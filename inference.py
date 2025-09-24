@@ -1,5 +1,6 @@
 import torch
 from transformers import DistilBertTokenizer, DistilBertForSequenceClassification
+import torch.nn.functional as F
 
 model_path = "distilbert_url_model"
 tokenizer = DistilBertTokenizer.from_pretrained(model_path)
