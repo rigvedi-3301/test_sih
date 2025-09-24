@@ -10,18 +10,18 @@ from torch.cuda.amp import autocast, GradScaler
 wandb.login()
 
 hyperparams = {
-    "warmup_ratio": 0.1,
+    "warmup_ratio": 0.08,
     "model_name": "distilbert-base-uncased",
     "max_length": 256,
-    "batch_size": 16,  
-    "learning_rate": 2e-5,
+    "batch_size": 32,  
+    "learning_rate": 2e-4,
     "epochs": 5,
     "optimizer": "AdamW",
     "loss_function": "CrossEntropyLoss",
     "train_val_split": 0.8,
     "shuffle_data": True,
     "scheduler_type": "cosine",
-    "subset_size": 50000  
+    "subset_size": 100000  
 }
 
 wandb.init(project="url_malware_demo", name="test_run_full_ft_1", config=hyperparams)
