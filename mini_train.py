@@ -47,8 +47,8 @@ val_size = len(df) - train_size
 dataset = TensorDataset(input_ids, attention_mask, labels)
 train_dataset, val_dataset = random_split(dataset, [train_size, val_size])
 
-train_loader = DataLoader(train_dataset, batch_size=hyperparams["batch_size"], shuffle=True)
-val_loader = DataLoader(val_dataset, batch_size=hyperparams["batch_size"])
+train_loader = DataLoader(train_dataset, batch_size=hyperparams["batch_size"], shuffle=True, num_workers=4)
+val_loader = DataLoader(val_dataset, batch_size=hyperparams["batch_size"],num_workers=4)
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 model = DistilBertForSequenceClassification.from_pretrained(
