@@ -13,6 +13,7 @@ test_urls = [
     "http://example.com",
     "http://malicious-site.com/bad",
     "https://safe-site.org",
+    "https://github.com"
 ]
 
 encoding = tokenizer(
