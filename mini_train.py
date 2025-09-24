@@ -71,7 +71,7 @@ scheduler = get_scheduler(
 )
 
 
-scaler = GradScaler(device_type="cuda)
+scaler = GradScaler(device_type="cuda")
 
 for epoch in range(hyperparams["epochs"]):
     model.train()
@@ -80,7 +80,7 @@ for epoch in range(hyperparams["epochs"]):
         b_input_ids, b_attention, b_labels = [x.to(device) for x in batch]
         optimizer.zero_grad()
 
-        with autocast(device_type="cuda):  
+        with autocast(device_type="cuda"):  
             outputs = model(input_ids=b_input_ids, attention_mask=b_attention)
             loss = loss_fn(outputs.logits, b_labels)
 
