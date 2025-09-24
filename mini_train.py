@@ -23,7 +23,7 @@ hyperparams = {
     "scheduler_type": "cosine"
 }
 
-wandb.init(project="url_malware_demo", name="test_run_1", config=hyperparams)
+wandb.init(project="url_malware_demo", name="test_run_full_ft_1", config=hyperparams)
 
 df = pd.read_csv("./minitrain_data/kaggle_demo.csv")
 df = df.sample(frac=1, random_state=42).reset_index(drop=True)
