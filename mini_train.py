@@ -1,3 +1,5 @@
+import random
+import numpy as np
 import pandas as pd
 import torch
 from torch.utils.data import TensorDataset, DataLoader
@@ -9,6 +11,15 @@ import wandb
 from torch.cuda.amp import autocast, GradScaler
 
 wandb.login()
+
+
+def set_seed(seed=42):
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+    torch.backends.cudnn.deterministic = True
+set_seed(42)
 
 hyperparams = {
     "warmup_ratio": 0.08,
@@ -32,7 +43,13 @@ df = pd.read_csv("./minitrain_data/kaggle_demo.csv")
 if hyperparams["subset_size"] is not None and hyperparams["subset_size"] < len(df):
     df = df.sample(n=hyperparams["subset_size"], random_state=42).reset_index(drop=True)
 else:
-    df = df.sample(frac=1, random_state=42).reset_index(drop=True)
+    train_df, val_df = train_test_split(
+    df,
+    test_size=1 - hyperparams["train_val_split"],
+    stratify=df["result"],
+    random_state=42
+)
+
 
 print(f"Using dataset size: {len(df)}")
 
