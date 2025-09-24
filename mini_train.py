@@ -79,7 +79,7 @@ val_dataset = TensorDataset(input_ids[val_idx], attention_mask[val_idx], labels[
 print(f"Train size: {len(train_dataset)} | Validation size: {len(val_dataset)}")
 
 train_loader = DataLoader(train_dataset, batch_size=hyperparams["batch_size"], shuffle=True, num_workers=4)
-val_loader = DataLoader(val_dataset, batch_size=hyperparams["batch_size"], num_workers=4)
+val_loader = DataLoader(val_dataset, batch_size=hyperparams["batch_size"], shuffle=True, num_workers=4)
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(f"Using device: {device}")
