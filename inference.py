@@ -11,10 +11,11 @@ model.to(device)
 model.eval()
 
 test_urls = [
-    "http://example.com",
-    "http://malicious-site.com/bad",
-    "https://safe-site.org",
-    "https://github.com"
+    "https://google.com",
+    "https://free-download-malware.ru",
+    "https://www.bankofamerica.com/login",
+    "http://bit.ly/2FakeLink",
+    "http://192.168.1.1/admin"
 ]
 
 encoding = tokenizer(
