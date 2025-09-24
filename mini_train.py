@@ -12,7 +12,6 @@ from torch.cuda.amp import autocast, GradScaler
 
 wandb.login()
 
-
 def set_seed(seed=42):
     random.seed(seed)
     np.random.seed(seed)
@@ -38,7 +37,7 @@ hyperparams = {
 
 wandb.init(project="url_malware_demo", name="test_run_full_ft_1", config=hyperparams)
 
-df = pd.read_csv("./minitrain_data/kaggle_demo.csv")
+df = pd.read_csv("./minitrain_data/csic_cleaned.csv")
 
 if hyperparams["subset_size"] is not None and hyperparams["subset_size"] < len(df):
     df = df.sample(n=hyperparams["subset_size"], random_state=42).reset_index(drop=True)
