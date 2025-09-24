@@ -21,23 +21,23 @@ def set_seed(seed=42):
 set_seed(42)
 
 hyperparams = {
-    "warmup_ratio": 0.08,
+    "warmup_ratio": 0.07,
     "model_name": "distilbert-base-uncased",
     "max_length": 256,
     "batch_size": 64,  
-    "learning_rate": 1.5e-5,
-    "epochs": 3,
+    "learning_rate": 2e-4,
+    "epochs": 5,
     "optimizer": "AdamW",
     "loss_function": "CrossEntropyLoss",
     "train_val_split": 0.8,
     "shuffle_data": True,
-    "scheduler_type": "cosine",
-    "subset_size": 200000  
+    "scheduler_type": "linear",
+    "subset_size": 350000  
 }
 
 wandb.init(project="url_malware_demo", name="test_run_full_ft_1", config=hyperparams)
 
-df = pd.read_csv("./minitrain_data/csic_cleaned.csv")
+df = pd.read_csv("./minitrain_data/kaggle_demo.csv")
 
 if hyperparams["subset_size"] is not None and hyperparams["subset_size"] < len(df):
     df = df.sample(n=hyperparams["subset_size"], random_state=42).reset_index(drop=True)
