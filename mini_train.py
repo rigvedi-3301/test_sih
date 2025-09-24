@@ -1,9 +1,10 @@
 import pandas as pd
 import torch
-from torch.utils.data import TensorDataset, DataLoader, random_split
+from torch.utils.data import TensorDataset, DataLoader
 from torch.optim import AdamW
 from transformers import DistilBertTokenizer, DistilBertForSequenceClassification, get_scheduler
 from sklearn.metrics import accuracy_score
+from sklearn.model_selection import train_test_split
 import wandb
 from torch.cuda.amp import autocast, GradScaler
 
@@ -13,15 +14,15 @@ hyperparams = {
     "warmup_ratio": 0.08,
     "model_name": "distilbert-base-uncased",
     "max_length": 256,
-    "batch_size": 32,  
-    "learning_rate": 1e-5,
+    "batch_size": 64,  
+    "learning_rate": 1.5e-5,
     "epochs": 3,
     "optimizer": "AdamW",
     "loss_function": "CrossEntropyLoss",
     "train_val_split": 0.8,
     "shuffle_data": True,
     "scheduler_type": "cosine",
-    "subset_size": 100000  
+    "subset_size": 200000  
 }
 
 wandb.init(project="url_malware_demo", name="test_run_full_ft_1", config=hyperparams)
@@ -31,7 +32,7 @@ df = pd.read_csv("./minitrain_data/kaggle_demo.csv")
 if hyperparams["subset_size"] is not None and hyperparams["subset_size"] < len(df):
     df = df.sample(n=hyperparams["subset_size"], random_state=42).reset_index(drop=True)
 else:
-    df = df.sample(frac=1, random_state=42).reset_index(drop=True)  
+    df = df.sample(frac=1, random_state=42).reset_index(drop=True)
 
 print(f"Using dataset size: {len(df)}")
 
@@ -46,13 +47,17 @@ encoding = tokenizer(
 
 input_ids = encoding["input_ids"]
 attention_mask = encoding["attention_mask"]
-labels = torch.tensor(df["result"].values)
+labels = torch.tensor(df["result"].values).to(torch.long)
 
-train_size = int(hyperparams["train_val_split"] * len(df))
-val_size = len(df) - train_size
+train_idx, val_idx = train_test_split(
+    range(len(df)),
+    test_size=1 - hyperparams["train_val_split"],
+    stratify=labels.numpy(),
+    random_state=42
+)
 
-dataset = TensorDataset(input_ids, attention_mask, labels)
-train_dataset, val_dataset = random_split(dataset, [train_size, val_size])
+train_dataset = TensorDataset(input_ids[train_idx], attention_mask[train_idx], labels[train_idx])
+val_dataset = TensorDataset(input_ids[val_idx], attention_mask[val_idx], labels[val_idx])
 
 print(f"Train size: {len(train_dataset)} | Validation size: {len(val_dataset)}")
 
@@ -90,14 +95,14 @@ for epoch in range(hyperparams["epochs"]):
         b_input_ids, b_attention, b_labels = [x.to(device) for x in batch]
         optimizer.zero_grad()
 
-        with autocast():  
+        with autocast():
             outputs = model(input_ids=b_input_ids, attention_mask=b_attention)
             loss = loss_fn(outputs.logits, b_labels)
 
         scaler.scale(loss).backward()
         scaler.step(optimizer)
         scaler.update()
-        scheduler.step()  
+        scheduler.step()
         total_loss += loss.item()
 
         if i % 10 == 0:
@@ -117,7 +122,6 @@ for epoch in range(hyperparams["epochs"]):
             all_labels.extend(b_labels.cpu().numpy())
 
     val_acc = accuracy_score(all_labels, all_preds)
-
     malicious_idx = [i for i, lbl in enumerate(all_labels) if lbl == 1]
     true_positives = sum(all_preds[i] == 1 for i in malicious_idx)
     total_malicious = len(malicious_idx)
