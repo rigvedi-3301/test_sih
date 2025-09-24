@@ -13,7 +13,7 @@ hyperparams = {
     "warmup_ratio": 0.1,
     "model_name": "distilbert-base-uncased",
     "max_length": 256,
-    "batch_size": 32,  
+    "batch_size": 16,  
     "learning_rate": 2e-5,
     "epochs": 5,
     "optimizer": "AdamW",
