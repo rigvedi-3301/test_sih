@@ -21,18 +21,17 @@ hyperparams = {
     "train_val_split": 0.8,
     "shuffle_data": True,
     "scheduler_type": "cosine",
-    "subset_size": 50000  # <-- New parameter for subset size
+    "subset_size": 50000  
 }
 
 wandb.init(project="url_malware_demo", name="test_run_full_ft_1", config=hyperparams)
 
 df = pd.read_csv("./minitrain_data/kaggle_demo.csv")
 
-# Use a random sample of the dataset or just first N rows
 if hyperparams["subset_size"] is not None and hyperparams["subset_size"] < len(df):
     df = df.sample(n=hyperparams["subset_size"], random_state=42).reset_index(drop=True)
 else:
-    df = df.sample(frac=1, random_state=42).reset_index(drop=True)  # Shuffle full dataset if subset_size not set or too big
+    df = df.sample(frac=1, random_state=42).reset_index(drop=True)  
 
 print(f"Using dataset size: {len(df)}")
 
