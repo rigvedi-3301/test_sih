@@ -13,7 +13,7 @@ hyperparams = {
     "warmup_ratio": 0.1,
     "model_name": "distilbert-base-uncased",
     "max_length": 256,
-    "batch_size": 64,  # RTX 4090 can go high, adjust if needed
+    "batch_size": 32,  
     "learning_rate": 2e-5,
     "epochs": 5,
     "optimizer": "AdamW",
@@ -41,7 +41,7 @@ input_ids = encoding["input_ids"]
 attention_mask = encoding["attention_mask"]
 labels = torch.tensor(df["result"].values)
 
-# === 5️⃣ Dataset & DataLoader ===
+
 train_size = int(hyperparams["train_val_split"] * len(df))
 val_size = len(df) - train_size
 dataset = TensorDataset(input_ids, attention_mask, labels)
@@ -50,7 +50,6 @@ train_dataset, val_dataset = random_split(dataset, [train_size, val_size])
 train_loader = DataLoader(train_dataset, batch_size=hyperparams["batch_size"], shuffle=True)
 val_loader = DataLoader(val_dataset, batch_size=hyperparams["batch_size"])
 
-# === 6️⃣ Model, Optimizer, Scheduler, Scaler ===
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 model = DistilBertForSequenceClassification.from_pretrained(
     hyperparams["model_name"],
@@ -61,7 +60,6 @@ model.to(device)
 optimizer = AdamW(model.parameters(), lr=hyperparams["learning_rate"])
 loss_fn = torch.nn.CrossEntropyLoss()
 
-# Total steps for scheduler
 total_steps = len(train_loader) * hyperparams["epochs"]
 warmup_steps = int(hyperparams["warmup_ratio"] * total_steps)
 
@@ -72,8 +70,8 @@ scheduler = get_scheduler(
     num_training_steps=total_steps
 )
 
-# For mixed precision
-scaler = GradScaler()
+
+scaler = GradScaler(device_type="cuda)
 
 for epoch in range(hyperparams["epochs"]):
     model.train()
@@ -82,14 +80,14 @@ for epoch in range(hyperparams["epochs"]):
         b_input_ids, b_attention, b_labels = [x.to(device) for x in batch]
         optimizer.zero_grad()
 
-        with autocast():  # mixed precision
+        with autocast(device_type="cuda):  
             outputs = model(input_ids=b_input_ids, attention_mask=b_attention)
             loss = loss_fn(outputs.logits, b_labels)
 
         scaler.scale(loss).backward()
         scaler.step(optimizer)
         scaler.update()
-        scheduler.step()  # step LR scheduler
+        scheduler.step()  
         total_loss += loss.item()
 
     avg_loss = total_loss / len(train_loader)
