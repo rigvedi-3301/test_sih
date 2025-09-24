@@ -20,13 +20,21 @@ hyperparams = {
     "loss_function": "CrossEntropyLoss",
     "train_val_split": 0.8,
     "shuffle_data": True,
-    "scheduler_type": "cosine"
+    "scheduler_type": "cosine",
+    "subset_size": 50000  # <-- New parameter for subset size
 }
 
 wandb.init(project="url_malware_demo", name="test_run_full_ft_1", config=hyperparams)
 
 df = pd.read_csv("./minitrain_data/kaggle_demo.csv")
-df = df.sample(frac=1, random_state=42).reset_index(drop=True)
+
+# Use a random sample of the dataset or just first N rows
+if hyperparams["subset_size"] is not None and hyperparams["subset_size"] < len(df):
+    df = df.sample(n=hyperparams["subset_size"], random_state=42).reset_index(drop=True)
+else:
+    df = df.sample(frac=1, random_state=42).reset_index(drop=True)  # Shuffle full dataset if subset_size not set or too big
+
+print(f"Using dataset size: {len(df)}")
 
 tokenizer = DistilBertTokenizer.from_pretrained(hyperparams["model_name"])
 encoding = tokenizer(
@@ -41,16 +49,20 @@ input_ids = encoding["input_ids"]
 attention_mask = encoding["attention_mask"]
 labels = torch.tensor(df["result"].values)
 
-
 train_size = int(hyperparams["train_val_split"] * len(df))
 val_size = len(df) - train_size
+
 dataset = TensorDataset(input_ids, attention_mask, labels)
 train_dataset, val_dataset = random_split(dataset, [train_size, val_size])
 
+print(f"Train size: {len(train_dataset)} | Validation size: {len(val_dataset)}")
+
 train_loader = DataLoader(train_dataset, batch_size=hyperparams["batch_size"], shuffle=True, num_workers=4)
-val_loader = DataLoader(val_dataset, batch_size=hyperparams["batch_size"],num_workers=4)
+val_loader = DataLoader(val_dataset, batch_size=hyperparams["batch_size"], num_workers=4)
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+print(f"Using device: {device}")
+
 model = DistilBertForSequenceClassification.from_pretrained(
     hyperparams["model_name"],
     num_labels=2
@@ -70,13 +82,12 @@ scheduler = get_scheduler(
     num_training_steps=total_steps
 )
 
-
 scaler = GradScaler()
 
 for epoch in range(hyperparams["epochs"]):
     model.train()
     total_loss = 0
-    for batch in train_loader:
+    for i, batch in enumerate(train_loader):
         b_input_ids, b_attention, b_labels = [x.to(device) for x in batch]
         optimizer.zero_grad()
 
@@ -89,6 +100,9 @@ for epoch in range(hyperparams["epochs"]):
         scaler.update()
         scheduler.step()  
         total_loss += loss.item()
+
+        if i % 10 == 0:
+            print(f"Epoch {epoch+1} | Batch {i+1}/{len(train_loader)} | Loss: {loss.item():.4f}")
 
     avg_loss = total_loss / len(train_loader)
 
@@ -110,7 +124,7 @@ for epoch in range(hyperparams["epochs"]):
     total_malicious = len(malicious_idx)
     detection_rate = true_positives / total_malicious if total_malicious > 0 else 0.0
 
-    print(f"Epoch {epoch+1} | Loss: {avg_loss:.4f} | Val Acc: {val_acc:.4f} | Detection Rate: {detection_rate:.4f}")
+    print(f"Epoch {epoch+1} | Avg Loss: {avg_loss:.4f} | Val Acc: {val_acc:.4f} | Detection Rate: {detection_rate:.4f}")
     wandb.log({
         "epoch": epoch+1,
         "loss": avg_loss,
