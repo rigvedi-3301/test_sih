@@ -28,7 +28,7 @@ config = {
     "loss_function": "CrossEntropyLoss"
 }
 
-wandb.init(project="cysecbert_electra_fusion" name="test_run_1", config=config)
+wandb.init(project="cysecbert_electra_fusion", name="test_run_1", config=config)
 
 df = pd.read_csv("./minitrain_data/csic_cleaned.csv")
 
