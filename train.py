@@ -29,9 +29,10 @@ config = {
     "loss_function": "CrossEntropyLoss",
     "weight_decay": 0.01,  
     "dropout_rate": 0.5,  
+    "max_samples": 100000,  
 }
 
-wandb.init(project="cysecbert_electra_fusion", name="benign_only_training", config=config)
+wandb.init(project="cysecbert_electra_fusion", name="benign_only_100k", config=config)
 
 df = pd.read_csv("dataset_1.csv")
 
@@ -45,6 +46,12 @@ if set(df['result'].unique()) != {0}:
 
 print(f"After filtering - Dataset shape: {df.shape}")
 
+if len(df) > config["max_samples"]:
+    print(f"📊 Limiting dataset to {config['max_samples']} samples...")
+    df = df.sample(n=config["max_samples"], random_state=42).reset_index(drop=True)
+else:
+    print(f"📊 Using all {len(df)} available samples (less than {config['max_samples']})")
+
 df = df.sample(frac=1, random_state=42).reset_index(drop=True)
 
 texts = df["url"].astype(str)
@@ -55,6 +62,7 @@ print(f"Training on {len(texts)} benign samples")
 cysec_tokenizer = AutoTokenizer.from_pretrained(config["cysecbert_model"])
 electra_tokenizer = AutoTokenizer.from_pretrained(config["electra_model"])
 
+print("🔄 Tokenizing texts...")
 cysec_enc = cysec_tokenizer(
     list(texts), 
     padding=True, 
@@ -162,7 +170,7 @@ best_val_loss = float('inf')
 patience = 2
 patience_counter = 0
 
-print("🚀 Starting benign-only training...")
+print("🚀 Starting benign-only training on 100k samples...")
 
 for epoch in range(config["epochs"]):
     model.train()
@@ -230,7 +238,7 @@ for epoch in range(config["epochs"]):
     if avg_val_loss < best_val_loss:
         best_val_loss = avg_val_loss
         patience_counter = 0
-        torch.save(model.state_dict(), "best_model_benign.pth")
+        torch.save(model.state_dict(), "best_model_benign_100k.pth")
         print("  💾 Saved best model")
     else:
         patience_counter += 1
@@ -240,10 +248,10 @@ for epoch in range(config["epochs"]):
         print("  🛑 Early stopping triggered!")
         break
 
-model.load_state_dict(torch.load("best_model_benign.pth"))
+model.load_state_dict(torch.load("best_model_benign_100k.pth"))
 
-model.save_pretrained("cysec_electra_fusion_model_benign")
-wandb.save("cysec_electra_fusion_model_benign/*")
+model.save_pretrained("cysec_electra_fusion_model_benign_100k")
+wandb.save("cysec_electra_fusion_model_benign_100k/*")
 
-print("✅ Benign-only training complete! Model saved as 'cysec_electra_fusion_model_benign'")
+print("✅ Benign-only training on 100k samples complete!")
 print(f"📊 Final metrics - Best Val Loss: {best_val_loss:.4f}, Final Val Acc: {val_acc:.4f}")
