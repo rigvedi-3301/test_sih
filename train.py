@@ -18,10 +18,10 @@ wandb.login()
 config = {
     "cysecbert_model": "markusbayer/CySecBERT",
     "electra_model": "google/electra-base-discriminator",
-    "max_length": 256,
+    "max_length": 128,
     "batch_size": 16,
     "learning_rate": 2e-5,
-    "epochs": 5,
+    "epochs": 3,
     "train_split": 0.8,  
     "warmup_ratio": 0.85,
     "scheduler_type": "linear",
