@@ -10,8 +10,11 @@ from transformers import (
 )
 from sklearn.metrics import accuracy_score
 import wandb
-from torch.cuda.amp import autocast, GradScaler
 import numpy as np
+
+# Disable unnecessary warnings
+import warnings
+warnings.filterwarnings("ignore")
 
 wandb.login()
 
@@ -19,20 +22,32 @@ config = {
     "cysecbert_model": "markusbayer/CySecBERT",
     "electra_model": "google/electra-base-discriminator",
     "max_length": 128,
-    "batch_size": 16,
+    "batch_size": 32,  # Increased batch size
     "learning_rate": 2e-5,
     "epochs": 3,
-    "train_split": 0.8,  
-    "warmup_ratio": 0.85,
+    "train_split": 0.9,  # More training data
+    "warmup_ratio": 0.1,  # Reduced warmup
     "scheduler_type": "linear",
     "optimizer": "AdamW",
     "loss_function": "CrossEntropyLoss",
     "weight_decay": 0.01,  
-    "dropout_rate": 0.5,  
-    "max_samples": 100000,  
+    "dropout_rate": 0.3,  # Reduced dropout
+    "max_samples": 100000,
 }
 
-wandb.init(project="cysecbert_electra_fusion", name="benign_only_100k", config=config)
+wandb.init(project="cysecbert_electra_fusion", name="benign_only_100k_gpu", config=config)
+
+# Check GPU availability properly
+print("🔍 Checking GPU availability...")
+if torch.cuda.is_available():
+    device = torch.device("cuda")
+    print(f"✅ GPU found: {torch.cuda.get_device_name()}")
+    print(f"✅ GPU memory: {torch.cuda.get_device_properties(0).total_memory / 1e9:.1f} GB")
+else:
+    device = torch.device("cpu")
+    print("❌ No GPU found, using CPU")
+
+print(f"Using device: {device}")
 
 df = pd.read_csv("dataset_1.csv")
 
@@ -46,6 +61,7 @@ if set(df['result'].unique()) != {0}:
 
 print(f"After filtering - Dataset shape: {df.shape}")
 
+# LIMIT TO 100,000 SAMPLES
 if len(df) > config["max_samples"]:
     print(f"📊 Limiting dataset to {config['max_samples']} samples...")
     df = df.sample(n=config["max_samples"], random_state=42).reset_index(drop=True)
@@ -59,30 +75,41 @@ labels = torch.tensor(df["result"].values, dtype=torch.long)
 
 print(f"Training on {len(texts)} benign samples")
 
+# Initialize tokenizers
 cysec_tokenizer = AutoTokenizer.from_pretrained(config["cysecbert_model"])
 electra_tokenizer = AutoTokenizer.from_pretrained(config["electra_model"])
 
+# Tokenize in smaller chunks to avoid memory issues
 print("🔄 Tokenizing texts...")
-cysec_enc = cysec_tokenizer(
-    list(texts), 
-    padding=True, 
-    truncation=True, 
-    max_length=config["max_length"], 
-    return_tensors="pt"
-)
-electra_enc = electra_tokenizer(
-    list(texts), 
-    padding=True, 
-    truncation=True, 
-    max_length=config["max_length"], 
-    return_tensors="pt"
-)
+
+def tokenize_in_chunks(tokenizer, texts, max_length, chunk_size=10000):
+    """Tokenize in chunks to avoid memory issues"""
+    all_input_ids = []
+    all_attention_mask = []
+    
+    for i in range(0, len(texts), chunk_size):
+        chunk_texts = texts[i:i + chunk_size]
+        encodings = tokenizer(
+            list(chunk_texts), 
+            padding=True, 
+            truncation=True, 
+            max_length=max_length, 
+            return_tensors="pt"
+        )
+        all_input_ids.append(encodings["input_ids"])
+        all_attention_mask.append(encodings["attention_mask"])
+        
+    return torch.cat(all_input_ids), torch.cat(all_attention_mask)
+
+# Tokenize in chunks
+cysec_ids, cysec_mask = tokenize_in_chunks(cysec_tokenizer, texts, config["max_length"])
+electra_ids, electra_mask = tokenize_in_chunks(electra_tokenizer, texts, config["max_length"])
 
 dataset = TensorDataset(
-    cysec_enc["input_ids"], 
-    cysec_enc["attention_mask"],
-    electra_enc["input_ids"], 
-    electra_enc["attention_mask"],
+    cysec_ids, 
+    cysec_mask,
+    electra_ids, 
+    electra_mask,
     labels
 )
 
@@ -97,37 +124,41 @@ train_dataset, val_dataset = random_split(
 print(f"Training samples: {len(train_dataset)}")
 print(f"Validation samples: {len(val_dataset)}")
 
+# Optimized DataLoader with pin_memory for GPU
 train_loader = DataLoader(
     train_dataset, 
     batch_size=config["batch_size"], 
     shuffle=True,
-    drop_last=True  
+    drop_last=True,
+    pin_memory=True if device.type == 'cuda' else False,
+    num_workers=4 if device.type == 'cuda' else 0
 )
 val_loader = DataLoader(
     val_dataset, 
-    batch_size=config["batch_size"]
+    batch_size=config["batch_size"],
+    pin_memory=True if device.type == 'cuda' else False,
+    num_workers=4 if device.type == 'cuda' else 0
 )
 
 class CySecElectraFusion(nn.Module):
-    def __init__(self, cysec_model_name, electra_model_name, dropout_rate=0.5):
+    def __init__(self, cysec_model_name, electra_model_name, dropout_rate=0.3):
         super().__init__()
         self.cysec = AutoModel.from_pretrained(cysec_model_name)
         self.electra = AutoModel.from_pretrained(electra_model_name)
         hidden_size = self.cysec.config.hidden_size + self.electra.config.hidden_size
         
+        # Simplified classifier for faster training
         self.classifier = nn.Sequential(
-            nn.Linear(hidden_size, 512),
-            nn.ReLU(),
-            nn.Dropout(dropout_rate),
-            nn.Linear(512, 256),
+            nn.Linear(hidden_size, 256),  # Reduced size
             nn.ReLU(),
             nn.Dropout(dropout_rate),
             nn.Linear(256, 2)  
         )
         
-        for param in list(self.cysec.encoder.layer[:4].parameters()):
+        # Freeze fewer layers for better performance
+        for param in list(self.cysec.encoder.layer[:2].parameters()):
             param.requires_grad = False
-        for param in list(self.electra.encoder.layer[:4].parameters()):
+        for param in list(self.electra.encoder.layer[:2].parameters()):
             param.requires_grad = False
 
     def forward(self, cysec_ids, cysec_mask, electra_ids, electra_mask):
@@ -135,9 +166,6 @@ class CySecElectraFusion(nn.Module):
         electra_out = self.electra(input_ids=electra_ids, attention_mask=electra_mask).last_hidden_state[:,0,:]
         combined = torch.cat((cysec_out, electra_out), dim=1)
         return self.classifier(combined)
-
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-print(f"Using device: {device}")
 
 model = CySecElectraFusion(
     config["cysecbert_model"], 
@@ -149,13 +177,19 @@ trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
 total_params = sum(p.numel() for p in model.parameters())
 print(f"Trainable parameters: {trainable_params:,} / {total_params:,}")
 
-optimizer = AdamW(
+# Use non-deprecated optimizer
+optimizer = torch.optim.AdamW(
     model.parameters(), 
     lr=config["learning_rate"],
     weight_decay=config["weight_decay"]
 )
 loss_fn = nn.CrossEntropyLoss()
-scaler = GradScaler()
+
+# Only use GradScaler if CUDA is available
+if device.type == 'cuda':
+    scaler = torch.amp.GradScaler('cuda')
+else:
+    scaler = None
 
 total_steps = len(train_loader) * config["epochs"]
 warmup_steps = int(config["warmup_ratio"] * total_steps)
@@ -178,38 +212,51 @@ for epoch in range(config["epochs"]):
     train_correct = 0
     train_total = 0
 
-    for batch in train_loader:
-        cysec_ids, cysec_mask, electra_ids, electra_mask, lbls = [b.to(device) for b in batch]
+    for batch_idx, batch in enumerate(train_loader):
+        cysec_ids, cysec_mask, electra_ids, electra_mask, lbls = [b.to(device, non_blocking=True) for b in batch]
         optimizer.zero_grad()
 
-        with autocast():
+        if device.type == 'cuda':
+            # Use autocast only for CUDA
+            with torch.amp.autocast('cuda'):
+                logits = model(cysec_ids, cysec_mask, electra_ids, electra_mask)
+                loss = loss_fn(logits, lbls)
+            
+            scaler.scale(loss).backward()
+            scaler.step(optimizer)
+            scaler.update()
+        else:
+            # CPU training without autocast
             logits = model(cysec_ids, cysec_mask, electra_ids, electra_mask)
             loss = loss_fn(logits, lbls)
-
-        scaler.scale(loss).backward()
+            loss.backward()
+            optimizer.step()
         
+        # Gradient clipping
         torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
         
-        scaler.step(optimizer)
-        scaler.update()
         scheduler.step()
-        
         total_loss += loss.item()
         
         preds = torch.argmax(logits, dim=1)
         train_correct += (preds == lbls).sum().item()
         train_total += lbls.size(0)
 
+        # Print progress every 100 batches
+        if (batch_idx + 1) % 100 == 0:
+            print(f"  Batch {batch_idx + 1}/{len(train_loader)}, Loss: {loss.item():.4f}")
+
     avg_loss = total_loss / len(train_loader)
     train_acc = train_correct / train_total
 
+    # Validation
     model.eval()
     val_loss = 0
     all_preds, all_lbls = [], []
     
     with torch.no_grad():
         for batch in val_loader:
-            cysec_ids, cysec_mask, electra_ids, electra_mask, lbls = [b.to(device) for b in batch]
+            cysec_ids, cysec_mask, electra_ids, electra_mask, lbls = [b.to(device, non_blocking=True) for b in batch]
             
             logits = model(cysec_ids, cysec_mask, electra_ids, electra_mask)
             loss = loss_fn(logits, lbls)
@@ -248,9 +295,18 @@ for epoch in range(config["epochs"]):
         print("  🛑 Early stopping triggered!")
         break
 
-model.load_state_dict(torch.load("best_model_benign_100k.pth"))
+# Load best model
+model.load_state_dict(torch.load("best_model_benign_100k.pth", map_location=device))
 
-model.save_pretrained("cysec_electra_fusion_model_benign_100k")
+# Save final model
+import os
+os.makedirs("cysec_electra_fusion_model_benign_100k", exist_ok=True)
+torch.save(model.state_dict(), "cysec_electra_fusion_model_benign_100k/pytorch_model.bin")
+
+# Save tokenizers
+cysec_tokenizer.save_pretrained("cysec_electra_fusion_model_benign_100k/cysec_tokenizer")
+electra_tokenizer.save_pretrained("cysec_electra_fusion_model_benign_100k/electra_tokenizer")
+
 wandb.save("cysec_electra_fusion_model_benign_100k/*")
 
 print("✅ Benign-only training on 100k samples complete!")
