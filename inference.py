@@ -115,6 +115,7 @@ print("🔮 Running anomaly detection...")
 
 criterion = nn.MSELoss()
 predictions = []
+errors = []
 
 with torch.no_grad():
     fused = fusion_encoder(cysec_ids, cysec_mask, electra_ids, electra_mask)
@@ -122,11 +123,10 @@ with torch.no_grad():
     
     for i in range(len(test_urls)):
         error = criterion(reconstructed[i], fused[i]).item()
+        errors.append(error)
         
-        if error < 0.05:
+        if error < 0.1:
             predictions.append("benign")
-        elif error < 0.08:
-            predictions.append("suspicious") 
         else:
             predictions.append("malicious")
 
@@ -135,18 +135,15 @@ print("🔒 URL Classification Results")
 print("="*80)
 
 benign_count = 0
-suspicious_count = 0
 malicious_count = 0
 
-for url, pred in zip(test_urls, predictions):
+for url, pred, error in zip(test_urls, predictions, errors):
     print(f"URL: {url}")
+    print(f"Reconstruction Error: {error:.6f}")
     
     if pred == "benign":
         print("✅ BENIGN")
         benign_count += 1
-    elif pred == "suspicious":
-        print("⚠️  SUSPICIOUS") 
-        suspicious_count += 1
     else:
         print("🚨 MALICIOUS")
         malicious_count += 1
@@ -154,6 +151,8 @@ for url, pred in zip(test_urls, predictions):
 
 print(f"\n📊 Summary:")
 print(f"Benign URLs: {benign_count}")
-print(f"Suspicious URLs: {suspicious_count}") 
 print(f"Malicious URLs: {malicious_count}")
 print(f"Total URLs analyzed: {len(test_urls)}")
+
+print(f"\n🎯 Threshold: Error < 0.1 = BENIGN, Error ≥ 0.1 = MALICIOUS")
+print(f"💡 Your training loss was ~0.043, so 0.1 is 2.3x higher (significant deviation)")
