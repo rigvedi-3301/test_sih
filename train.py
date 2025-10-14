@@ -24,15 +24,15 @@ config = {
     "electra_model": "google/electra-base-discriminator",
     "max_length": 128,
     "batch_size": 32,  
-    "learning_rate": 3e-4,
+    "learning_rate": 3e-5,
     "epochs": 5,
     "train_split": 0.9,  
-    "warmup_ratio": 0.85,  
+    "warmup_ratio": 0.085,  
     "scheduler_type": "linear",
     "optimizer": "AdamW",
     "loss_function": "CrossEntropyLoss",
-    "weight_decay": 0.01,  
-    "dropout_rate": 0.3,  
+    "weight_decay": 0.075,  
+    "dropout_rate": 0.55,  
     "max_samples": 250000,
 }
 
@@ -145,16 +145,19 @@ class CySecElectraFusion(nn.Module):
         self.electra = AutoModel.from_pretrained(electra_model_name)
         hidden_size = self.cysec.config.hidden_size + self.electra.config.hidden_size
         
-        self.classifier = nn.Sequential(
+       self.classifier = nn.Sequential(
             nn.Linear(hidden_size, 256),
             nn.ReLU(),
-            nn.Dropout(dropout_rate),
-            nn.Linear(256, 2)  
+            nn.Dropout(dropout_rate),  
+            nn.Linear(256, 128),       
+            nn.ReLU(),
+            nn.Dropout(dropout_rate),  
+            nn.Linear(128, 2)  
         )
         
-        for param in list(self.cysec.encoder.layer[:2].parameters()):
+        for param in list(self.cysec.encoder.layer[:6].parameters()):
             param.requires_grad = False
-        for param in list(self.electra.encoder.layer[:2].parameters()):
+        for param in list(self.electra.encoder.layer[:6].parameters()):
             param.requires_grad = False
 
     def forward(self, cysec_ids, cysec_mask, electra_ids, electra_mask):
