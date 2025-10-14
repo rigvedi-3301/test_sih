@@ -41,19 +41,19 @@ device = torch.device("cuda")
 print(f"✅ GPU: {torch.cuda.get_device_name()} ({torch.cuda.get_device_properties(0).total_memory/1e9:.1f} GB)")
 torch.cuda.empty_cache()
 
-df = pd.read_csv("minitrain_data/csic_cleaned.csv")
+df = pd.read_csv("dataset_1.csv")
 print(f"Loaded dataset shape: {df.shape}")
 
-if "classification" not in df.columns or "URL" not in df.columns:
-    raise ValueError("❌ csic_cleaned.csv must contain columns: 'URL' and 'classification'")
+if "result" not in df.columns or "url" not in df.columns:
+    raise ValueError("❌ dataset_1.csv must contain columns: 'url' and 'result'")
 
-df = df[df["classification"] == 0].reset_index(drop=True)
+df = df[df["result"] == 0].reset_index(drop=True)
 print(f"Filtered benign samples: {len(df)}")
 
 if len(df) > config["max_samples"]:
     df = df.sample(n=config["max_samples"], random_state=42).reset_index(drop=True)
 
-texts = df["URL"].astype(str)
+texts = df["url"].astype(str)
 
 cysec_tokenizer = AutoTokenizer.from_pretrained(config["cysecbert_model"])
 electra_tokenizer = AutoTokenizer.from_pretrained(config["electra_model"])
