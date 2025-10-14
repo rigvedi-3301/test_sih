@@ -100,8 +100,8 @@ def classify_urls(urls, fusion_encoder, autoencoder, cysec_tokenizer, electra_to
     electra_mask = electra_encodings["attention_mask"].to(device)
     
     with torch.no_grad():
-        # Get embeddings
-        embeddings = fusion_encoder(cysec_ids, cysec_mask, electra_ids, electra_mask)
+        # Get embeddings (detached to match training behavior)
+        embeddings = fusion_encoder(cysec_ids, cysec_mask, electra_ids, electra_mask).detach()
         
         # Reconstruct using autoencoder
         reconstructed, _ = autoencoder(embeddings)
@@ -109,25 +109,30 @@ def classify_urls(urls, fusion_encoder, autoencoder, cysec_tokenizer, electra_to
         # Calculate reconstruction error
         reconstruction_errors = torch.mean((embeddings - reconstructed) ** 2, dim=1).cpu().numpy()
     
-    # Normalize errors to 0-1 scale (benign similarity score)
-    max_error = max(reconstruction_errors)
-    benign_scores = [1.0 - (error / max_error) for error in reconstruction_errors]
+    # Use percentile-based threshold for more adaptive classification
+    # URLs with reconstruction error in the lower 70% are considered benign
+    threshold_error = np.percentile(reconstruction_errors, 70)
     
-    # Classify based on threshold
     results = []
-    for url, benign_score in zip(urls, benign_scores):
-        if benign_score >= 0.70:
+    for url, error in zip(urls, reconstruction_errors):
+        if error <= threshold_error:
             classification = "BENIGN"
-            confidence = benign_score
+            # Lower error = higher confidence
+            confidence = 1.0 - (error / threshold_error)
+            benign_score = confidence
         else:
             classification = "MALICIOUS"
-            confidence = 1.0 - benign_score
+            # Higher error = higher confidence in malicious
+            max_error = max(reconstruction_errors)
+            confidence = (error - threshold_error) / (max_error - threshold_error)
+            benign_score = 1.0 - (error / max_error)
         
         results.append({
             "url": url,
             "classification": classification,
             "confidence": confidence,
-            "benign_score": benign_score
+            "benign_score": benign_score,
+            "reconstruction_error": error
         })
     
     return results
@@ -158,9 +163,9 @@ def main():
     results = classify_urls(test_urls, fusion_encoder, autoencoder, cysec_tokenizer, electra_tokenizer, config, device)
     
     # Display results
-    print("="*90)
-    print(f"{'URL':<60} {'CLASSIFICATION':<15} {'CONFIDENCE':<15}")
-    print("="*90)
+    print("="*100)
+    print(f"{'URL':<60} {'CLASSIFICATION':<15} {'CONFIDENCE':<12} {'ERROR':<10}")
+    print("="*100)
     
     benign_count = 0
     malicious_count = 0
@@ -169,6 +174,7 @@ def main():
         url = result["url"][:57] + "..." if len(result["url"]) > 60 else result["url"]
         classification = result["classification"]
         confidence = f"{result['confidence']:.2%}"
+        error = f"{result['reconstruction_error']:.4f}"
         
         if classification == "BENIGN":
             icon = "🟢"
@@ -177,9 +183,9 @@ def main():
             icon = "🔴"
             malicious_count += 1
         
-        print(f"{icon} {url:<58} {classification:<15} {confidence:<15}")
+        print(f"{icon} {url:<58} {classification:<15} {confidence:<12} {error:<10}")
     
-    print("="*90)
+    print("="*100)
     print(f"\n📊 Summary:")
     print(f"   🟢 Benign URLs: {benign_count}")
     print(f"   🔴 Malicious URLs: {malicious_count}")
