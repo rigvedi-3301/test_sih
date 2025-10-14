@@ -11,11 +11,14 @@ model.to(device)
 model.eval()
 
 test_urls = [
-    "https://google.com",
-    "https://free-download-malware.ru",
-    "https://www.bankofamerica.com/login",
-    "http://bit.ly/2FakeLink",
-    "http://192.168.1.1/admin"
+    "https://www.example.com/",
+    "https://shop.example.com/product/12345?ref=google&utm_source=email",
+    "https://docs.example.org/user-guide/v2.1/user_guide.pdf",
+    "https://accounts.example.com/login?continue=/dashboard",
+    "http://192.0.2.45/downloads/update.exe",
+    "http://203.0.113.77/installer/latest_installer.zip?payload=cmd.exe",
+    "https://www.example.com/%2e%2e/%2e%2e/admin/config.php",
+    "https://login.example.com/?user=admin&pass=%3Cscript%3Ealert(1)%3C%2Fscript%3E"
 ]
 
 encoding = tokenizer(
