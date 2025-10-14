@@ -66,7 +66,8 @@ def tokenize_in_chunks(tokenizer, texts, max_length, chunk_size=5000):
     total_chunks = (len(texts) - 1) // chunk_size + 1
     for i in range(0, len(texts), chunk_size):
         chunk_num = i // chunk_size + 1
-        print(f"  Tokenizing chunk {chunk_num}/{total_chunks}...")
+        if chunk_num % 10 == 0 or chunk_num == 1 or chunk_num == total_chunks:
+            print(f"  Tokenizing chunk {chunk_num}/{total_chunks}...")
         chunk = texts[i:i + chunk_size]
         enc = tokenizer(list(chunk), padding=True, truncation=True, max_length=max_length, return_tensors="pt")
         all_ids.append(enc["input_ids"])
@@ -166,7 +167,7 @@ for epoch in range(config["epochs"]):
         total_loss += loss.item()
         batch_count += 1
         
-        if (batch_idx + 1) % 10 == 0:
+        if (batch_idx + 1) % 100 == 0:
             print(f"  Epoch {epoch+1}, Batch {batch_idx+1}/{len(train_loader)}, Loss: {loss.item():.6f}")
     
     val_loss = 0.0
