@@ -4,6 +4,7 @@ from transformers import AutoTokenizer, AutoModel
 import torch.nn.functional as F
 import json
 import os
+import numpy as np
 
 class FusionEncoder(nn.Module):
     def __init__(self, cysec_model_name, electra_model_name):
@@ -21,6 +22,28 @@ class FusionEncoder(nn.Module):
         el_out = self.electra(input_ids=electra_ids, attention_mask=electra_mask).last_hidden_state[:, 0, :]
         return torch.cat((cy_out, el_out), dim=1)
 
+class AutoEncoder(nn.Module):
+    def __init__(self, input_dim, dropout_rate=0.4):
+        super().__init__()
+        self.encoder = nn.Sequential(
+            nn.Linear(input_dim, 256),
+            nn.ReLU(),
+            nn.Dropout(dropout_rate),
+            nn.Linear(256, 64),
+            nn.ReLU()
+        )
+        self.decoder = nn.Sequential(
+            nn.Linear(64, 256),
+            nn.ReLU(),
+            nn.Linear(256, input_dim),
+            nn.Tanh()
+        )
+
+    def forward(self, x):
+        z = self.encoder(x)
+        reconstructed = self.decoder(z)
+        return reconstructed, z
+
 model_path = "cysec_electra_oneclass_model"
 
 if not os.path.exists(model_path):
@@ -33,6 +56,7 @@ cysec_tokenizer = AutoTokenizer.from_pretrained(f"{model_path}/cysec_tokenizer")
 electra_tokenizer = AutoTokenizer.from_pretrained(f"{model_path}/electra_tokenizer")
 
 fusion_encoder = FusionEncoder(config["cysecbert_model"], config["electra_model"])
+autoencoder = AutoEncoder(fusion_encoder.out_dim, dropout_rate=config["dropout_rate"])
 
 weights_path = "cysec_electra_oneclass.pth"
 if not os.path.exists(weights_path):
@@ -40,10 +64,13 @@ if not os.path.exists(weights_path):
 
 state_dict = torch.load(weights_path, map_location="cpu")
 fusion_encoder.load_state_dict(state_dict["fusion_encoder"])
+autoencoder.load_state_dict(state_dict["autoencoder"])
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 fusion_encoder.to(device)
+autoencoder.to(device)
 fusion_encoder.eval()
+autoencoder.eval()
 
 print(f"✅ Model loaded successfully on: {device}")
 print(f"📊 Model trained on: {config['max_samples']} benign samples")
@@ -86,55 +113,60 @@ cysec_mask = cysec_encodings["attention_mask"].to(device)
 electra_ids = electra_encodings["input_ids"].to(device)
 electra_mask = electra_encodings["attention_mask"].to(device)
 
-print("🔮 Analyzing URL deviations from benign patterns...")
+print("🔮 Analyzing URL similarity to benign training patterns...")
 
 with torch.no_grad():
+    # Get embeddings for all URLs
     embeddings = fusion_encoder(cysec_ids, cysec_mask, electra_ids, electra_mask)
     
-    # Calculate how "weird" each URL embedding is compared to expected benign patterns
-    # Higher values = more deviation from learned benign patterns
-    deviations = torch.norm(embeddings, dim=1).cpu().numpy()
+    # Try to reconstruct them using the autoencoder
+    reconstructed, _ = autoencoder(embeddings)
+    
+    # Calculate reconstruction error (how well autoencoder can recreate the embedding)
+    reconstruction_errors = torch.mean((embeddings - reconstructed) ** 2, dim=1).cpu().numpy()
 
 print("\n" + "="*80)
-print("🔍 URL Deviation Analysis from Benign Training")
+print("🔍 URL Similarity to Benign Training Patterns")
 print("="*80)
 
-# Normalize deviations to 0-1 scale for easier interpretation
-max_dev = max(deviations)
-normalized_deviations = [dev / max_dev for dev in deviations]
+# Convert reconstruction error to "benign similarity" score
+# Lower error = more similar to training data
+max_error = max(reconstruction_errors)
+benign_similarities = [1.0 - (error / max_error) for error in reconstruction_errors]
 
 benign_count = 0
 malicious_count = 0
 
-for url, deviation, norm_dev in zip(test_urls, deviations, normalized_deviations):
+for url, error, similarity in zip(test_urls, reconstruction_errors, benign_similarities):
     print(f"URL: {url}")
-    print(f"Raw Deviation: {deviation:.4f}")
-    print(f"Normalized Deviation: {norm_dev:.4f}")
+    print(f"Reconstruction Error: {error:.6f}")
+    print(f"Similarity to Benign: {similarity:.2%}")
     
-    # Convert deviation to "benign confidence" (inverse relationship)
-    benign_confidence = max(0, 1.0 - norm_dev)
-    
-    if norm_dev < 0.3:
-        print(f"🟢 BENIGN - Confidence: {benign_confidence:.2%}")
-        print("   ✓ Closely matches learned benign patterns")
+    if similarity > 0.85:
+        print("🟢 HIGHLY BENIGN")
+        print("   ✓ Very similar to training patterns")
         benign_count += 1
-    elif norm_dev < 0.6:
-        print(f"🟡 SUSPICIOUS - Confidence: {benign_confidence:.2%}")
-        print("   ⚠️  Somewhat different from benign patterns")
+    elif similarity > 0.70:
+        print("🟡 LIKELY BENIGN") 
+        print("   ✓ Similar to training patterns")
+        benign_count += 1
+    elif similarity > 0.50:
+        print("🟠 SUSPICIOUS")
+        print("   ⚠️  Somewhat different from training patterns")
         malicious_count += 1
     else:
-        print(f"🔴 MALICIOUS - Confidence: {benign_confidence:.2%}")
-        print("   🚨 Significantly different from benign patterns")
+        print("🔴 LIKELY MALICIOUS")
+        print("   🚨 Very different from training patterns")
         malicious_count += 1
     print("-" * 80)
 
 print(f"\n📊 Summary:")
-print(f"🟢 URLs matching benign patterns: {benign_count}")
-print(f"🔴 URLs deviating from benign patterns: {malicious_count}")
+print(f"🟢 URLs similar to benign training: {benign_count}")
+print(f"🔴 URLs different from benign training: {malicious_count}")
 print(f"📋 Total URLs analyzed: {len(test_urls)}")
 
 print(f"\n🎯 Interpretation:")
-print(f"• Lower deviation = More similar to training benign URLs")
-print(f"• Higher deviation = More different from training benign URLs")
-print(f"• Model was trained on {config['max_samples']} benign URLs")
-print(f"• High deviation suggests potential malicious content")
+print(f"• Reconstruction Error: How different the URL is from what the model expects")
+print(f"• Lower error = More similar to {config['max_samples']} benign training URLs")  
+print(f"• Higher error = More different from training (potentially malicious)")
+print(f"• Your training loss was ~0.043, so errors around 0.04-0.06 are normal for benign URLs")
