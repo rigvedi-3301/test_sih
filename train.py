@@ -15,6 +15,8 @@ import os
 import warnings
 warnings.filterwarnings("ignore")
 
+os.environ["TOKENIZERS_PARALLELISM"] = "false"
+
 wandb.login()
 
 config = {
@@ -31,7 +33,7 @@ config = {
     "loss_function": "CrossEntropyLoss",
     "weight_decay": 0.01,  
     "dropout_rate": 0.3,  
-    "max_samples": 250000,  
+    "max_samples": 250000,
 }
 
 wandb.init(project="cysecbert_electra_fusion", name="benign_only_250k_gpu", config=config)
@@ -101,13 +103,7 @@ def tokenize_in_chunks(tokenizer, texts, max_length, chunk_size=10000):
 cysec_ids, cysec_mask = tokenize_in_chunks(cysec_tokenizer, texts, config["max_length"])
 electra_ids, electra_mask = tokenize_in_chunks(electra_tokenizer, texts, config["max_length"])
 
-print("🚀 Moving data to GPU...")
-cysec_ids = cysec_ids.to(device)
-cysec_mask = cysec_mask.to(device)
-electra_ids = electra_ids.to(device)
-electra_mask = electra_mask.to(device)
-labels = labels.to(device)
-
+print("💾 Keeping data on CPU, will move to GPU during training...")
 dataset = TensorDataset(
     cysec_ids, 
     cysec_mask,
@@ -133,15 +129,13 @@ train_loader = DataLoader(
     shuffle=True,
     drop_last=True,
     pin_memory=True,  
-    num_workers=4,    
-    persistent_workers=True  
+    num_workers=2,    
 )
 val_loader = DataLoader(
     val_dataset, 
     batch_size=config["batch_size"],
     pin_memory=True,
-    num_workers=4,
-    persistent_workers=True
+    num_workers=2,
 )
 
 class CySecElectraFusion(nn.Module):
@@ -210,7 +204,7 @@ for epoch in range(config["epochs"]):
     train_total = 0
 
     for batch_idx, batch in enumerate(train_loader):
-        cysec_ids, cysec_mask, electra_ids, electra_mask, lbls = batch
+        cysec_ids, cysec_mask, electra_ids, electra_mask, lbls = [b.to(device, non_blocking=True) for b in batch]
         optimizer.zero_grad()
 
         with torch.amp.autocast('cuda'):
@@ -242,7 +236,7 @@ for epoch in range(config["epochs"]):
     
     with torch.no_grad():
         for batch in val_loader:
-            cysec_ids, cysec_mask, electra_ids, electra_mask, lbls = batch
+            cysec_ids, cysec_mask, electra_ids, electra_mask, lbls = [b.to(device, non_blocking=True) for b in batch]
             
             with torch.amp.autocast('cuda'):
                 logits = model(cysec_ids, cysec_mask, electra_ids, electra_mask)
