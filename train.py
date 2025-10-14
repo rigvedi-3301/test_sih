@@ -1,14 +1,11 @@
+import os, json, warnings
 import pandas as pd
 import torch
 from torch import nn
 from torch.utils.data import DataLoader, random_split, TensorDataset
 from transformers import AutoTokenizer, AutoModel, get_scheduler
 import wandb
-import numpy as np
-import os, json, warnings
-from sklearn.metrics import roc_auc_score
 
-warnings.filterwarnings("ignore")
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
 wandb.login()
@@ -26,28 +23,34 @@ config = {
     "optimizer": "AdamW",
     "weight_decay": 0.05,
     "dropout_rate": 0.4,
-    "max_samples": 300000,
+    "max_samples": 250000,
 }
 
-wandb.init(project="cysec_electra_oneclass", name="fusion_autoencoder_benign_only", config=config)
-
+wandb.init(
+    project="cysec_electra_oneclass",
+    name="fusion_autoencoder_benign_only",
+    config=config
+)
 if not torch.cuda.is_available():
     raise RuntimeError("❌ GPU NOT FOUND! Please check CUDA.")
 device = torch.device("cuda")
-print(f"✅ GPU: {torch.cuda.get_device_name()} ({torch.cuda.get_device_properties(0).total_memory/1e9:.1f} GB)")
+print(f"✅ GPU: {torch.cuda.get_device_name()} "
+      f"({torch.cuda.get_device_properties(0).total_memory/1e9:.1f} GB)")
 torch.cuda.empty_cache()
 
-df = pd.read_csv("minitrain_data/csic_cleaned.csv")
+df = pd.read_csv("dataset_1.csv")
 print(f"Loaded dataset shape: {df.shape}")
 
-if "classification" in df.columns:
-    df = df[df["classification"] == 0].reset_index(drop=True)
-    print(f"Filtered benign samples: {len(df)}")
+if "result" not in df.columns or "url" not in df.columns:
+    raise ValueError("❌ dataset_1.csv must contain columns: 'url' and 'result'")
+
+df = df[df["result"] == 0].reset_index(drop=True)
+print(f"Filtered benign samples: {len(df)}")
 
 if len(df) > config["max_samples"]:
     df = df.sample(n=config["max_samples"], random_state=42).reset_index(drop=True)
 
-texts = df["URL"].astype(str)
+texts = df["url"].astype(str)
 
 cysec_tokenizer = AutoTokenizer.from_pretrained(config["cysecbert_model"])
 electra_tokenizer = AutoTokenizer.from_pretrained(config["electra_model"])
@@ -56,7 +59,13 @@ def tokenize_in_chunks(tokenizer, texts, max_length, chunk_size=10000):
     all_ids, all_masks = [], []
     for i in range(0, len(texts), chunk_size):
         chunk = texts[i:i + chunk_size]
-        enc = tokenizer(list(chunk), padding=True, truncation=True, max_length=max_length, return_tensors="pt")
+        enc = tokenizer(
+            list(chunk),
+            padding=True,
+            truncation=True,
+            max_length=max_length,
+            return_tensors="pt"
+        )
         all_ids.append(enc["input_ids"])
         all_masks.append(enc["attention_mask"])
     return torch.cat(all_ids), torch.cat(all_masks)
@@ -65,9 +74,13 @@ cysec_ids, cysec_mask = tokenize_in_chunks(cysec_tokenizer, texts, config["max_l
 electra_ids, electra_mask = tokenize_in_chunks(electra_tokenizer, texts, config["max_length"])
 
 dataset = TensorDataset(cysec_ids, cysec_mask, electra_ids, electra_mask)
+
 train_size = int(config["train_split"] * len(dataset))
 val_size = len(dataset) - train_size
-train_dataset, val_dataset = random_split(dataset, [train_size, val_size], generator=torch.Generator().manual_seed(42))
+train_dataset, val_dataset = random_split(
+    dataset, [train_size, val_size],
+    generator=torch.Generator().manual_seed(42)
+)
 
 train_loader = DataLoader(train_dataset, batch_size=config["batch_size"], shuffle=True, num_workers=2)
 val_loader = DataLoader(val_dataset, batch_size=config["batch_size"], num_workers=2)
@@ -116,7 +129,12 @@ autoencoder = AutoEncoder(fusion_encoder.out_dim, dropout_rate=config["dropout_r
 
 params = list(fusion_encoder.parameters()) + list(autoencoder.parameters())
 optimizer = torch.optim.AdamW(params, lr=config["learning_rate"], weight_decay=config["weight_decay"])
-scheduler = get_scheduler(config["scheduler_type"], optimizer, num_warmup_steps=int(config["warmup_ratio"] * len(train_loader) * config["epochs"]), num_training_steps=len(train_loader) * config["epochs"])
+scheduler = get_scheduler(
+    config["scheduler_type"],
+    optimizer,
+    num_warmup_steps=int(config["warmup_ratio"] * len(train_loader) * config["epochs"]),
+    num_training_steps=len(train_loader) * config["epochs"]
+)
 criterion = nn.MSELoss()
 
 for epoch in range(config["epochs"]):
@@ -138,7 +156,8 @@ for epoch in range(config["epochs"]):
         total_loss += loss.item()
 
     val_loss = 0.0
-    fusion_encoder.eval(); autoencoder.eval()
+    fusion_encoder.eval()
+    autoencoder.eval()
     with torch.no_grad():
         for batch in val_loader:
             cysec_ids, cysec_mask, electra_ids, electra_mask = [b.to(device) for b in batch]
