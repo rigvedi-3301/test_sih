@@ -11,7 +11,7 @@ class CySecElectraFusion(nn.Module):
         self.cysec = AutoModel.from_pretrained(cysec_model_name)
         self.electra = AutoModel.from_pretrained(electra_model_name)
         hidden_size = self.cysec.config.hidden_size + self.electra.config.hidden_size
-        
+
         self.classifier = nn.Sequential(
             nn.Linear(hidden_size, 256),
             nn.ReLU(),
@@ -19,21 +19,26 @@ class CySecElectraFusion(nn.Module):
             nn.Linear(256, 128),
             nn.ReLU(),
             nn.Dropout(dropout_rate),
-            nn.Linear(128, 2)  
+            nn.Linear(128, 2)
         )
-        
+
         for param in list(self.cysec.encoder.layer[:6].parameters()):
             param.requires_grad = False
         for param in list(self.electra.encoder.layer[:6].parameters()):
             param.requires_grad = False
 
     def forward(self, cysec_ids, cysec_mask, electra_ids, electra_mask):
-        cysec_out = self.cysec(input_ids=cysec_ids, attention_mask=cysec_mask).last_hidden_state[:,0,:]
-        electra_out = self.electra(input_ids=electra_ids, attention_mask=electra_mask).last_hidden_state[:,0,:]
+        cysec_out = self.cysec(input_ids=cysec_ids, attention_mask=cysec_mask).last_hidden_state[:, 0, :]
+        electra_out = self.electra(input_ids=electra_ids, attention_mask=electra_mask).last_hidden_state[:, 0, :]
         combined = torch.cat((cysec_out, electra_out), dim=1)
         return self.classifier(combined)
 
-model_path = "cysec_electra_fusion_model_benign_250k"
+
+model_path = "cysec_electra_oneclass_model"
+
+if not os.path.exists(model_path):
+    raise FileNotFoundError(f"❌ Model path not found: {model_path}")
+
 with open(f"{model_path}/training_config.json", "r") as f:
     config = json.load(f)
 
@@ -46,7 +51,17 @@ model = CySecElectraFusion(
     dropout_rate=config["dropout_rate"]
 )
 
-model.load_state_dict(torch.load(f"{model_path}/pytorch_model.bin", map_location='cpu'))
+weights_path = os.path.join(model_path, "cysec_electra_oneclass.pth")
+if not os.path.exists(weights_path):
+    raise FileNotFoundError(f"❌ Model weights not found at: {weights_path}")
+
+state_dict = torch.load(weights_path, map_location="cpu")
+if "fusion_encoder" in state_dict:
+    print("ℹ️  Detected combined training checkpoint — loading encoder parts only.")
+    fusion_weights = {k.replace("module.", ""): v for k, v in state_dict["fusion_encoder"].items()}
+    model.load_state_dict(fusion_weights, strict=False)
+else:
+    model.load_state_dict(state_dict, strict=False)
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 model.to(device)
@@ -75,7 +90,6 @@ cysec_encodings = cysec_tokenizer(
     max_length=config["max_length"],
     return_tensors="pt"
 )
-
 electra_encodings = electra_tokenizer(
     test_urls,
     padding=True,
@@ -107,12 +121,11 @@ for url, pred, prob in zip(test_urls, preds.cpu().numpy(), probs.cpu().numpy()):
     print(f"URL: {url}")
     print(f"Prediction: {label_map[pred]} | Confidence: {confidence:.4f}")
     print(f"Probabilities: benign={prob[0]:.4f}, malicious={prob[1]:.4f}")
-    
+
     if confidence < 0.7:
         print("⚠️  Low confidence prediction")
     elif confidence > 0.95:
         print("✅ High confidence prediction")
-    
     print("-" * 80)
 
 benign_count = (preds == 0).sum().item()
@@ -122,6 +135,3 @@ print(f"\n📊 Summary:")
 print(f"Benign URLs: {benign_count}")
 print(f"Malicious URLs: {malicious_count}")
 print(f"Total URLs analyzed: {len(test_urls)}")
-
-print(f"\n💡 Note: This model was trained on {config['max_samples']} benign-only samples")
-print("   It may be biased towards predicting 'benign' due to the training data")
