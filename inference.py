@@ -109,23 +109,30 @@ def classify_urls(urls, fusion_encoder, autoencoder, cysec_tokenizer, electra_to
         # Calculate reconstruction error
         reconstruction_errors = torch.mean((embeddings - reconstructed) ** 2, dim=1).cpu().numpy()
     
-    # Use percentile-based threshold for more adaptive classification
-    # URLs with reconstruction error in the lower 70% are considered benign
-    threshold_error = np.percentile(reconstruction_errors, 70)
+    # Calculate statistical threshold using mean + standard deviation approach
+    # This is more robust for one-class classification
+    mean_error = np.mean(reconstruction_errors)
+    std_error = np.std(reconstruction_errors)
+    
+    # URLs within mean + 2*std are considered benign (covers ~95% of normal distribution)
+    # This is a common approach in anomaly detection
+    threshold_error = mean_error + 1.5 * std_error
     
     results = []
     for url, error in zip(urls, reconstruction_errors):
+        # Calculate normalized error score (0 = perfect match, 1 = very anomalous)
+        normalized_error = min(error / threshold_error, 1.0)
+        
         if error <= threshold_error:
             classification = "BENIGN"
             # Lower error = higher confidence
-            confidence = 1.0 - (error / threshold_error)
+            confidence = 1.0 - normalized_error
             benign_score = confidence
         else:
             classification = "MALICIOUS"
             # Higher error = higher confidence in malicious
-            max_error = max(reconstruction_errors)
-            confidence = (error - threshold_error) / (max_error - threshold_error)
-            benign_score = 1.0 - (error / max_error)
+            confidence = min((error - threshold_error) / threshold_error, 1.0)
+            benign_score = 1.0 - normalized_error
         
         results.append({
             "url": url,
@@ -135,7 +142,7 @@ def classify_urls(urls, fusion_encoder, autoencoder, cysec_tokenizer, electra_to
             "reconstruction_error": error
         })
     
-    return results
+    return results, threshold_error
 
 def main():
     # Test URLs
@@ -160,7 +167,7 @@ def main():
     print(f"✅ Model loaded successfully on: {device}\n")
     
     print("🔍 Analyzing URLs...\n")
-    results = classify_urls(test_urls, fusion_encoder, autoencoder, cysec_tokenizer, electra_tokenizer, config, device)
+    results, threshold = classify_urls(test_urls, fusion_encoder, autoencoder, cysec_tokenizer, electra_tokenizer, config, device)
     
     # Display results
     print("="*100)
@@ -190,6 +197,10 @@ def main():
     print(f"   🟢 Benign URLs: {benign_count}")
     print(f"   🔴 Malicious URLs: {malicious_count}")
     print(f"   📋 Total Analyzed: {len(test_urls)}")
+    print(f"   🎯 Threshold: {threshold:.4f} (mean + 1.5×std)")
+    print(f"\n💡 Interpretation:")
+    print(f"   • Reconstruction error below {threshold:.4f} → BENIGN")
+    print(f"   • Reconstruction error above {threshold:.4f} → MALICIOUS")
 
 if __name__ == "__main__":
     main()
