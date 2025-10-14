@@ -139,19 +139,19 @@ val_loader = DataLoader(
 )
 
 class CySecElectraFusion(nn.Module):
-    def __init__(self, cysec_model_name, electra_model_name, dropout_rate=0.3):
+    def __init__(self, cysec_model_name, electra_model_name, dropout_rate=0.55):
         super().__init__()
         self.cysec = AutoModel.from_pretrained(cysec_model_name)
         self.electra = AutoModel.from_pretrained(electra_model_name)
         hidden_size = self.cysec.config.hidden_size + self.electra.config.hidden_size
         
-       self.classifier = nn.Sequential(
+        self.classifier = nn.Sequential(
             nn.Linear(hidden_size, 256),
             nn.ReLU(),
-            nn.Dropout(dropout_rate),  
-            nn.Linear(256, 128),       
+            nn.Dropout(dropout_rate),
+            nn.Linear(256, 128),
             nn.ReLU(),
-            nn.Dropout(dropout_rate),  
+            nn.Dropout(dropout_rate),
             nn.Linear(128, 2)  
         )
         
