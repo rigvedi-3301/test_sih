@@ -75,7 +75,7 @@ def load_model():
     
     return fusion_encoder, autoencoder, cysec_tokenizer, electra_tokenizer, config, device
 
-def classify_urls(urls, fusion_encoder, autoencoder, cysec_tokenizer, electra_tokenizer, config, device):
+def classify_urls(urls, fusion_encoder, autoencoder, cysec_tokenizer, electra_tokenizer, config, device, threshold=None):
     """Classify URLs as malicious or benign"""
     
     # Tokenize URLs
@@ -109,43 +109,57 @@ def classify_urls(urls, fusion_encoder, autoencoder, cysec_tokenizer, electra_to
         # Calculate reconstruction error
         reconstruction_errors = torch.mean((embeddings - reconstructed) ** 2, dim=1).cpu().numpy()
     
-    # Calculate statistical threshold using mean + standard deviation approach
-    # This is more robust for one-class classification
-    mean_error = np.mean(reconstruction_errors)
-    std_error = np.std(reconstruction_errors)
-    
-    # URLs within mean + 2*std are considered benign (covers ~95% of normal distribution)
-    # This is a common approach in anomaly detection
-    threshold_error = mean_error + 1.5 * std_error
+    # If no threshold provided, use a conservative approach based on error distribution
+    # We'll identify likely benign URLs first, then set threshold
+    if threshold is None:
+        # Sort errors and use the gap detection method
+        sorted_errors = np.sort(reconstruction_errors)
+        
+        # Find the largest gap in the sorted errors (indicates separation between benign/malicious)
+        gaps = np.diff(sorted_errors)
+        
+        if len(gaps) > 0:
+            # Find where the largest gap occurs
+            largest_gap_idx = np.argmax(gaps)
+            
+            # Set threshold at the midpoint of the largest gap
+            threshold = (sorted_errors[largest_gap_idx] + sorted_errors[largest_gap_idx + 1]) / 2
+            
+            # Safety check: threshold should be reasonable relative to min error
+            min_error = sorted_errors[0]
+            if threshold < min_error * 1.5:
+                # If threshold is too close to minimum, use a more conservative multiplier
+                threshold = min_error * 2.0
+        else:
+            # Fallback: use mean of lowest errors
+            threshold = np.mean(sorted_errors[:max(1, len(sorted_errors)//3)]) * 2.5
     
     results = []
     for url, error in zip(urls, reconstruction_errors):
-        # Calculate normalized error score (0 = perfect match, 1 = very anomalous)
-        normalized_error = min(error / threshold_error, 1.0)
+        # Calculate how far the error is from threshold
+        error_ratio = error / threshold
         
-        if error <= threshold_error:
+        if error <= threshold:
             classification = "BENIGN"
-            # Lower error = higher confidence
-            confidence = 1.0 - normalized_error
-            benign_score = confidence
+            # Confidence based on how much below threshold
+            confidence = max(0.5, 1.0 - error_ratio)
         else:
             classification = "MALICIOUS"
-            # Higher error = higher confidence in malicious
-            confidence = min((error - threshold_error) / threshold_error, 1.0)
-            benign_score = 1.0 - normalized_error
+            # Confidence based on how much above threshold
+            confidence = min(0.99, 0.5 + (error_ratio - 1.0) * 0.5)
         
         results.append({
             "url": url,
             "classification": classification,
             "confidence": confidence,
-            "benign_score": benign_score,
-            "reconstruction_error": error
+            "reconstruction_error": error,
+            "error_ratio": error_ratio
         })
     
-    return results, threshold_error
+    return results, threshold
 
 def main():
-    # Test URLs
+    # Test URLs - mix of clearly benign and clearly malicious
     test_urls = [
         "https://www.example.com/",
         "https://shop.example.com/product/12345?ref=google&utm_source=email",
@@ -170,9 +184,9 @@ def main():
     results, threshold = classify_urls(test_urls, fusion_encoder, autoencoder, cysec_tokenizer, electra_tokenizer, config, device)
     
     # Display results
-    print("="*100)
-    print(f"{'URL':<60} {'CLASSIFICATION':<15} {'CONFIDENCE':<12} {'ERROR':<10}")
-    print("="*100)
+    print("="*110)
+    print(f"{'URL':<60} {'CLASS':<12} {'CONFIDENCE':<12} {'ERROR':<10} {'RATIO':<8}")
+    print("="*110)
     
     benign_count = 0
     malicious_count = 0
@@ -182,6 +196,7 @@ def main():
         classification = result["classification"]
         confidence = f"{result['confidence']:.2%}"
         error = f"{result['reconstruction_error']:.4f}"
+        ratio = f"{result['error_ratio']:.2f}x"
         
         if classification == "BENIGN":
             icon = "🟢"
@@ -190,17 +205,22 @@ def main():
             icon = "🔴"
             malicious_count += 1
         
-        print(f"{icon} {url:<58} {classification:<15} {confidence:<12} {error:<10}")
+        print(f"{icon} {url:<58} {classification:<12} {confidence:<12} {error:<10} {ratio:<8}")
     
-    print("="*100)
+    print("="*110)
     print(f"\n📊 Summary:")
     print(f"   🟢 Benign URLs: {benign_count}")
     print(f"   🔴 Malicious URLs: {malicious_count}")
     print(f"   📋 Total Analyzed: {len(test_urls)}")
-    print(f"   🎯 Threshold: {threshold:.4f} (mean + 1.5×std)")
+    print(f"   🎯 Threshold: {threshold:.6f}")
     print(f"\n💡 Interpretation:")
-    print(f"   • Reconstruction error below {threshold:.4f} → BENIGN")
-    print(f"   • Reconstruction error above {threshold:.4f} → MALICIOUS")
+    print(f"   • Ratio < 1.0x → BENIGN (below threshold)")
+    print(f"   • Ratio > 1.0x → MALICIOUS (above threshold)")
+    print(f"   • Threshold found using gap detection in error distribution")
+    print(f"\n⚙️  To adjust sensitivity:")
+    print(f"   • If too many false positives: increase threshold manually")
+    print(f"   • If too many false negatives: decrease threshold manually")
+    print(f"   • Call classify_urls(..., threshold=YOUR_VALUE) to set manually")
 
 if __name__ == "__main__":
     main()
