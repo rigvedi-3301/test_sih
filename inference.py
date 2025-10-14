@@ -109,54 +109,28 @@ def classify_urls(urls, fusion_encoder, autoencoder, cysec_tokenizer, electra_to
         # Calculate reconstruction error
         reconstruction_errors = torch.mean((embeddings - reconstructed) ** 2, dim=1).cpu().numpy()
     
-    # If no threshold provided, use a conservative approach based on error distribution
-    # We'll identify likely benign URLs first, then set threshold
+    # Use a fixed threshold based on typical training loss
+    # Since your training loss was ~0.043 (validation), we set threshold slightly higher
+    # URLs significantly above this are anomalous (malicious)
     if threshold is None:
-        # Sort errors and use the gap detection method
-        sorted_errors = np.sort(reconstruction_errors)
-        
-        # Find the largest gap in the sorted errors (indicates separation between benign/malicious)
-        gaps = np.diff(sorted_errors)
-        
-        if len(gaps) > 0:
-            # Find where the largest gap occurs
-            largest_gap_idx = np.argmax(gaps)
-            
-            # Set threshold at the midpoint of the largest gap
-            threshold = (sorted_errors[largest_gap_idx] + sorted_errors[largest_gap_idx + 1]) / 2
-            
-            # Safety check: threshold should be reasonable relative to min error
-            min_error = sorted_errors[0]
-            if threshold < min_error * 1.5:
-                # If threshold is too close to minimum, use a more conservative multiplier
-                threshold = min_error * 2.0
-        else:
-            # Fallback: use mean of lowest errors
-            threshold = np.mean(sorted_errors[:max(1, len(sorted_errors)//3)]) * 2.5
+        # Conservative threshold: 3x the expected training loss
+        # This captures natural variance while flagging true outliers
+        threshold = 0.15  # Adjust this value based on your validation loss
     
     results = []
-    for url, error in zip(urls, reconstruction_errors):
-        # Calculate how far the error is from threshold
-        error_ratio = error / threshold
-        
+    for url, error in zip(urls, reconstruction_errors):        
         if error <= threshold:
             classification = "BENIGN"
-            # Confidence based on how much below threshold
-            confidence = max(0.5, 1.0 - error_ratio)
         else:
             classification = "MALICIOUS"
-            # Confidence based on how much above threshold
-            confidence = min(0.99, 0.5 + (error_ratio - 1.0) * 0.5)
         
         results.append({
             "url": url,
             "classification": classification,
-            "confidence": confidence,
-            "reconstruction_error": error,
-            "error_ratio": error_ratio
+            "reconstruction_error": error
         })
     
-    return results, threshold
+    return results, threshold, reconstruction_errors
 
 def main():
     # Test URLs - mix of clearly benign and clearly malicious
@@ -181,22 +155,28 @@ def main():
     print(f"✅ Model loaded successfully on: {device}\n")
     
     print("🔍 Analyzing URLs...\n")
-    results, threshold = classify_urls(test_urls, fusion_encoder, autoencoder, cysec_tokenizer, electra_tokenizer, config, device)
+    results, threshold, all_errors = classify_urls(test_urls, fusion_encoder, autoencoder, cysec_tokenizer, electra_tokenizer, config, device)
+    
+    # Print error distribution first for debugging
+    print("📊 Reconstruction Error Distribution:")
+    print(f"   Min Error:  {np.min(all_errors):.6f}")
+    print(f"   Max Error:  {np.max(all_errors):.6f}")
+    print(f"   Mean Error: {np.mean(all_errors):.6f}")
+    print(f"   Std Error:  {np.std(all_errors):.6f}")
+    print(f"   Threshold:  {threshold:.6f}\n")
     
     # Display results
-    print("="*110)
-    print(f"{'URL':<60} {'CLASS':<12} {'CONFIDENCE':<12} {'ERROR':<10} {'RATIO':<8}")
-    print("="*110)
+    print("="*90)
+    print(f"{'URL':<65} {'CLASSIFICATION':<15} {'ERROR':<10}")
+    print("="*90)
     
     benign_count = 0
     malicious_count = 0
     
     for result in results:
-        url = result["url"][:57] + "..." if len(result["url"]) > 60 else result["url"]
+        url = result["url"][:62] + "..." if len(result["url"]) > 65 else result["url"]
         classification = result["classification"]
-        confidence = f"{result['confidence']:.2%}"
-        error = f"{result['reconstruction_error']:.4f}"
-        ratio = f"{result['error_ratio']:.2f}x"
+        error = f"{result['reconstruction_error']:.6f}"
         
         if classification == "BENIGN":
             icon = "🟢"
@@ -205,22 +185,17 @@ def main():
             icon = "🔴"
             malicious_count += 1
         
-        print(f"{icon} {url:<58} {classification:<12} {confidence:<12} {error:<10} {ratio:<8}")
+        print(f"{icon} {url:<63} {classification:<15} {error:<10}")
     
-    print("="*110)
+    print("="*90)
     print(f"\n📊 Summary:")
     print(f"   🟢 Benign URLs: {benign_count}")
     print(f"   🔴 Malicious URLs: {malicious_count}")
     print(f"   📋 Total Analyzed: {len(test_urls)}")
-    print(f"   🎯 Threshold: {threshold:.6f}")
-    print(f"\n💡 Interpretation:")
-    print(f"   • Ratio < 1.0x → BENIGN (below threshold)")
-    print(f"   • Ratio > 1.0x → MALICIOUS (above threshold)")
-    print(f"   • Threshold found using gap detection in error distribution")
-    print(f"\n⚙️  To adjust sensitivity:")
-    print(f"   • If too many false positives: increase threshold manually")
-    print(f"   • If too many false negatives: decrease threshold manually")
-    print(f"   • Call classify_urls(..., threshold=YOUR_VALUE) to set manually")
+    print(f"\n💡 Current threshold: {threshold:.6f}")
+    print(f"   • To make MORE sensitive (catch more malicious): DECREASE threshold")
+    print(f"   • To make LESS sensitive (fewer false alarms): INCREASE threshold")
+    print(f"   • Suggested range based on your data: 0.05 to 0.30")
 
 if __name__ == "__main__":
     main()
