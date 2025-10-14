@@ -72,8 +72,6 @@ fusion_encoder.eval()
 autoencoder.eval()
 
 print(f"✅ Autoencoder model loaded successfully on: {device}")
-print(f"📊 Model trained on: {config['max_samples']} benign samples")
-print(f"🎯 Final training loss: ~0.043 | Final validation loss: ~0.032")
 
 test_urls = [
     "https://www.example.com/",
@@ -116,7 +114,7 @@ electra_mask = electra_encodings["attention_mask"].to(device)
 print("🔮 Running anomaly detection...")
 
 criterion = nn.MSELoss()
-reconstruction_errors = []
+predictions = []
 
 with torch.no_grad():
     fused = fusion_encoder(cysec_ids, cysec_mask, electra_ids, electra_mask)
@@ -124,38 +122,38 @@ with torch.no_grad():
     
     for i in range(len(test_urls)):
         error = criterion(reconstructed[i], fused[i]).item()
-        reconstruction_errors.append(error)
+        
+        if error < 0.05:
+            predictions.append("benign")
+        elif error < 0.08:
+            predictions.append("suspicious") 
+        else:
+            predictions.append("malicious")
 
 print("\n" + "="*80)
-print("🔒 CySecBERT + ELECTRA Autoencoder Anomaly Detection Results")
+print("🔒 URL Classification Results")
 print("="*80)
 
 benign_count = 0
 suspicious_count = 0
 malicious_count = 0
 
-for url, error in zip(test_urls, reconstruction_errors):
+for url, pred in zip(test_urls, predictions):
     print(f"URL: {url}")
-    print(f"Reconstruction Error: {error:.6f}")
     
-    if error < 0.05:
-        print("✅ BENIGN - Low reconstruction error")
+    if pred == "benign":
+        print("✅ BENIGN")
         benign_count += 1
-    elif error < 0.08:
-        print("⚠️  SUSPICIOUS - Medium reconstruction error")
+    elif pred == "suspicious":
+        print("⚠️  SUSPICIOUS") 
         suspicious_count += 1
     else:
-        print("🚨 MALICIOUS - High reconstruction error")
+        print("🚨 MALICIOUS")
         malicious_count += 1
     print("-" * 80)
 
 print(f"\n📊 Summary:")
 print(f"Benign URLs: {benign_count}")
-print(f"Suspicious URLs: {suspicious_count}")
+print(f"Suspicious URLs: {suspicious_count}") 
 print(f"Malicious URLs: {malicious_count}")
 print(f"Total URLs analyzed: {len(test_urls)}")
-
-print(f"\n💡 Detection Thresholds:")
-print(f"Error < 0.05: Benign (matches training patterns)")
-print(f"Error 0.05-0.08: Suspicious (somewhat different)")
-print(f"Error > 0.08: Malicious (very different from training)")
