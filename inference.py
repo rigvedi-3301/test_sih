@@ -141,7 +141,7 @@ def main():
         # "https://www.wikipedia.org/",
         "https://shop.example.com/product/12345?ref=google&utm_source=email",
         "https://docs.example.org/user-guide/v2.1/user_guide.pdf",
-        "https://www.python.org/",
+        # "https://www.python.org/",
         "http://192.0.2.45/downloads/update.exe",
         "http://203.0.113.77/installer/latest_installer.zip?payload=cmd.exe",
         "https://www.example.com/%2e%2e/%2e%2e/admin/config.php",
