@@ -2,15 +2,9 @@ import torch
 import os
 import json
 import numpy as np
-import warnings
 from torch import nn
 from transformers import AutoTokenizer, AutoModel
-from transformers.utils import logging as hf_logging
-
-
-# Suppress Hugging Face warnings
-warnings.filterwarnings("ignore", category=UserWarning)
-os.environ["TRANSFORMERS_VERBOSITY"] = "error"
+from transformers.utils import logging as hf_logging  # ✅ correct import
 
 # -------------------------------
 # Fusion Encoder
@@ -89,16 +83,15 @@ def load_model(model_path="cysec_electra_oneclass_model_v4", weights_path="cysec
     if not os.path.exists(weights_path):
         raise FileNotFoundError(f"❌ Weights not found: {weights_path}")
 
+    # ✅ Suppress Hugging Face model loading warnings
+    hf_logging.set_verbosity_error()
+
     # Load training config
     with open(os.path.join(model_path, "training_config.json"), "r") as f:
         config = json.load(f)
 
     cysec_tokenizer = AutoTokenizer.from_pretrained(os.path.join(model_path, "cysec_tokenizer"))
     electra_tokenizer = AutoTokenizer.from_pretrained(os.path.join(model_path, "electra_tokenizer"))
-
-    # Suppress Hugging Face weight initialization messages
-    transformers_logger = __import__("transformers.utils.logging", fromlist=["logging"])
-    transformers_logger.logging.set_verbosity_error()
 
     fusion_encoder = FusionEncoder(config["cysecbert_model"], config["electra_model"], freeze_layers=config.get("freeze_layers", 8))
     autoencoder = AutoEncoder(fusion_encoder.out_dim, dropout_rate=config.get("dropout_rate", 0.5))
@@ -130,6 +123,7 @@ def classify_urls(urls, fusion_encoder, autoencoder, cysec_tokenizer, electra_to
         reconstructed, _ = autoencoder(embeddings)
         errors = torch.mean((embeddings - reconstructed) ** 2, dim=1).cpu().numpy()
 
+    # Adaptive threshold (not printed)
     if threshold is None:
         threshold = np.mean(errors) + 0.1 * np.std(errors)
 
@@ -154,6 +148,9 @@ def main():
         "https://login.example.com/?user=admin&pass=%3Cscript%3Ealert(1)%3C%2Fscript%3E",
         "https://www.bankofamerica.com/login",
         "http://bit.ly/2FakeLink",
+        "https://www.wikipedia.org/",
+        "https://github.com/",
+        "https://malicious-phish-login.xyz/secure.php"
     ]
 
     print("🔄 Loading model...")
@@ -161,14 +158,14 @@ def main():
 
     results = classify_urls(test_urls, fusion_encoder, autoencoder, cysec_tokenizer, electra_tokenizer, config, device)
 
-    print("\n" + "="*95)
+    print("\n" + "=" * 95)
     print(f"{'URL':<80} {'CLASS':<12}")
-    print("="*95)
+    print("=" * 95)
     for r in results:
         icon = "🟢" if r["classification"] == "BENIGN" else "🔴"
         url = r["url"][:77] + "..." if len(r["url"]) > 80 else r["url"]
         print(f"{icon} {url:<79} {r['classification']:<12}")
-    print("="*95)
+    print("=" * 95)
 
 
 if __name__ == "__main__":
