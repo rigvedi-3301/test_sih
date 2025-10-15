@@ -127,10 +127,9 @@ def classify_urls(urls, fusion_encoder, autoencoder, cysec_tokenizer, electra_to
     for url, error in zip(urls, errors):
         results.append({
             "url": url,
-            "classification": "BENIGN" if error <= threshold else "MALICIOUS",
-            "reconstruction_error": float(error)
+            "classification": "BENIGN" if error <= threshold else "MALICIOUS"
         })
-    return results, threshold, errors
+    return results, threshold
 
 
 # -------------------------------
@@ -138,16 +137,11 @@ def classify_urls(urls, fusion_encoder, autoencoder, cysec_tokenizer, electra_to
 # -------------------------------
 def main():
     test_urls = [
-        # "https://www.wikipedia.org/",
         "https://shop.example.com/product/12345?ref=google&utm_source=email",
         "https://docs.example.org/user-guide/v2.1/user_guide.pdf",
-        # "https://www.python.org/",
         "http://192.0.2.45/downloads/update.exe",
         "http://203.0.113.77/installer/latest_installer.zip?payload=cmd.exe",
-        # "https://www.example.com/%2e%2e/%2e%2e/admin/config.php",
         "https://login.example.com/?user=admin&pass=%3Cscript%3Ealert(1)%3C%2Fscript%3E",
-        #"https://google.com",
-        # "https://free-download-malware.ru",
         "https://www.bankofamerica.com/login",
         "http://bit.ly/2FakeLink",
     ]
@@ -155,20 +149,17 @@ def main():
     print("🔄 Loading model...")
     fusion_encoder, autoencoder, cysec_tokenizer, electra_tokenizer, config, device = load_model()
 
-    results, threshold, errors = classify_urls(test_urls, fusion_encoder, autoencoder, cysec_tokenizer, electra_tokenizer, config, device)
+    results, threshold = classify_urls(test_urls, fusion_encoder, autoencoder, cysec_tokenizer, electra_tokenizer, config, device)
 
-    print("\n📊 Reconstruction Error Distribution:")
-    print(f"Min: {np.min(errors):.6f}, Max: {np.max(errors):.6f}, Mean: {np.mean(errors):.6f}")
-    print(f"Adaptive Threshold: {threshold:.6f}\n")
-
-    print("="*110)
-    print(f"{'URL':<80} {'CLASS':<12} {'ERROR':<10}")
-    print("="*110)
+    print(f"\nAdaptive Threshold: {threshold:.6f}\n")
+    print("="*95)
+    print(f"{'URL':<80} {'CLASS':<12}")
+    print("="*95)
     for r in results:
         icon = "🟢" if r["classification"] == "BENIGN" else "🔴"
         url = r["url"][:77] + "..." if len(r["url"]) > 80 else r["url"]
-        print(f"{icon} {url:<79} {r['classification']:<12} {r['reconstruction_error']:.6f}")
-    print("="*110)
+        print(f"{icon} {url:<79} {r['classification']:<12}")
+    print("="*95)
 
 
 if __name__ == "__main__":
