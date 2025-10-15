@@ -5,13 +5,16 @@ import json
 import os
 import numpy as np
 
+# ============================================================
+#  CySec + ELECTRA Fusion Model Definition
+# ============================================================
 class CySecElectraFusion(nn.Module):
     def __init__(self, cysec_model_name, electra_model_name, dropout_rate=0.55):
         super().__init__()
         self.cysec = AutoModel.from_pretrained(cysec_model_name)
         self.electra = AutoModel.from_pretrained(electra_model_name)
         hidden_size = self.cysec.config.hidden_size + self.electra.config.hidden_size
-        
+
         self.classifier = nn.Sequential(
             nn.Linear(hidden_size, 256),
             nn.ReLU(),
@@ -21,7 +24,8 @@ class CySecElectraFusion(nn.Module):
             nn.Dropout(dropout_rate),
             nn.Linear(128, 2)
         )
-        
+
+        # Freeze early encoder layers to save GPU memory
         for param in list(self.cysec.encoder.layer[:6].parameters()):
             param.requires_grad = False
         for param in list(self.electra.encoder.layer[:6].parameters()):
@@ -33,64 +37,97 @@ class CySecElectraFusion(nn.Module):
         combined = torch.cat((cysec_out, electra_out), dim=1)
         return self.classifier(combined)
 
+
+# ============================================================
+#  Load Model + Tokenizers
+# ============================================================
 def load_model():
     model_path = "cysec_electra_oneclass_model"
-    
+
     if not os.path.exists(model_path):
-        raise FileNotFoundError(f"❌ Model path not found: {model_path}")
-    
+        raise FileNotFoundError(f"Model path not found: {model_path}")
+
     with open(f"{model_path}/training_config.json", "r") as f:
         config = json.load(f)
-    
+
     cysec_tokenizer = AutoTokenizer.from_pretrained(f"{model_path}/cysec_tokenizer")
     electra_tokenizer = AutoTokenizer.from_pretrained(f"{model_path}/electra_tokenizer")
-    
+
     model = CySecElectraFusion(config["cysecbert_model"], config["electra_model"], dropout_rate=config["dropout_rate"])
-    
-    weights_path = "cysec_electra_oneclass.pth"
+
+    weights_path = f"{model_path}/pytorch_model.bin"
     if not os.path.exists(weights_path):
-        raise FileNotFoundError(f"❌ Model weights not found at: {weights_path}")
-    
+        raise FileNotFoundError(f"Model weights not found at: {weights_path}")
+
     state_dict = torch.load(weights_path, map_location="cpu")
-    if "fusion_encoder" in state_dict and "autoencoder" in state_dict:
+
+    # Detect autoencoder fusion model (used in one-class setup)
+    if "fusion_encoder" in state_dict:
         print("⚠️ Detected autoencoder checkpoint — using fusion_encoder weights for inference.")
-        model_state = state_dict["fusion_encoder"]
-        model.load_state_dict(model_state, strict=False)
-    else:
-        model.load_state_dict(state_dict, strict=False)
-    
+        state_dict = {k.replace("fusion_encoder.", ""): v for k, v in state_dict.items() if "fusion_encoder." in k}
+
+    model.load_state_dict(state_dict, strict=False)
+
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model.to(device)
     model.eval()
-    
+
+    print("✅ Model loaded successfully on:", device)
     return model, cysec_tokenizer, electra_tokenizer, config, device
 
-def classify_urls(urls, model, cysec_tokenizer, electra_tokenizer, config, device):
-    cysec_enc = cysec_tokenizer(urls, padding=True, truncation=True, max_length=config["max_length"], return_tensors="pt")
-    electra_enc = electra_tokenizer(urls, padding=True, truncation=True, max_length=config["max_length"], return_tensors="pt")
-    
-    cysec_ids = cysec_enc["input_ids"].to(device)
-    cysec_mask = cysec_enc["attention_mask"].to(device)
-    electra_ids = electra_enc["input_ids"].to(device)
-    electra_mask = electra_enc["attention_mask"].to(device)
-    
+
+# ============================================================
+#  Inference / Classification
+# ============================================================
+def classify_urls(urls, model, cysec_tokenizer, electra_tokenizer, config, device, benign_threshold=0.45):
+    cysec_encodings = cysec_tokenizer(
+        urls,
+        padding=True,
+        truncation=True,
+        max_length=config["max_length"],
+        return_tensors="pt"
+    )
+    electra_encodings = electra_tokenizer(
+        urls,
+        padding=True,
+        truncation=True,
+        max_length=config["max_length"],
+        return_tensors="pt"
+    )
+
+    cysec_ids = cysec_encodings["input_ids"].to(device)
+    cysec_mask = cysec_encodings["attention_mask"].to(device)
+    electra_ids = electra_encodings["input_ids"].to(device)
+    electra_mask = electra_encodings["attention_mask"].to(device)
+
     with torch.no_grad():
         logits = model(cysec_ids, cysec_mask, electra_ids, electra_mask)
         probs = torch.softmax(logits, dim=1)
-        preds = torch.argmax(probs, dim=1)
-    
+        benign_probs = probs[:, 0]  # class 0 = benign
+
     results = []
-    for url, pred, prob in zip(urls, preds.cpu().numpy(), probs.cpu().numpy()):
-        classification = "BENIGN" if pred == 0 else "MALICIOUS"
+    for url, benign_prob in zip(urls, benign_probs.cpu().numpy()):
+        if benign_prob < benign_threshold:
+            classification = "MALICIOUS"
+            confidence = 1 - benign_prob
+        else:
+            classification = "BENIGN"
+            confidence = benign_prob
+
         results.append({
             "url": url,
             "classification": classification,
-            "confidence": float(prob[pred]),
-            "benign_prob": float(prob[0]),
-            "malicious_prob": float(prob[1])
+            "confidence": float(confidence),
+            "benign_prob": float(benign_prob),
+            "malicious_prob": float(1 - benign_prob)
         })
+
     return results
 
+
+# ============================================================
+#  MAIN SCRIPT
+# ============================================================
 def main():
     test_urls = [
         "https://www.example.com/",
@@ -107,31 +144,42 @@ def main():
         "http://bit.ly/2FakeLink",
         "http://192.168.1.1/admin"
     ]
-    
+
     print("Loading model...")
     model, cysec_tokenizer, electra_tokenizer, config, device = load_model()
-    print(f"✅ Model loaded successfully on: {device}\n")
-    
-    print("🔍 Analyzing URLs...\n")
-    results = classify_urls(test_urls, model, cysec_tokenizer, electra_tokenizer, config, device)
-    
+    print("\n🔍 Analyzing URLs...\n")
+
+    results = classify_urls(test_urls, model, cysec_tokenizer, electra_tokenizer, config, device, benign_threshold=0.45)
+
     print("="*100)
     print(f"{'URL':<65} {'CLASSIFICATION':<15} {'CONFIDENCE':<10} {'BENIGN':<10} {'MALICIOUS':<10}")
     print("="*100)
-    
-    benign_count = sum(r["classification"] == "BENIGN" for r in results)
-    malicious_count = len(results) - benign_count
-    
-    for r in results:
-        url = r["url"][:62] + "..." if len(r["url"]) > 65 else r["url"]
-        icon = "🟢" if r["classification"] == "BENIGN" else "🔴"
-        print(f"{icon} {url:<63} {r['classification']:<15} {r['confidence']:.4f}   {r['benign_prob']:.4f}     {r['malicious_prob']:.4f}")
-    
+
+    benign_count = 0
+    malicious_count = 0
+
+    for result in results:
+        url = result["url"][:62] + "..." if len(result["url"]) > 65 else result["url"]
+        classification = result["classification"]
+        confidence = f"{result['confidence']:.4f}"
+        benign_prob = f"{result['benign_prob']:.4f}"
+        malicious_prob = f"{result['malicious_prob']:.4f}"
+
+        if classification == "BENIGN":
+            icon = "🟢"
+            benign_count += 1
+        else:
+            icon = "🔴"
+            malicious_count += 1
+
+        print(f"{icon} {url:<63} {classification:<15} {confidence:<10} {benign_prob:<10} {malicious_prob:<10}")
+
     print("="*100)
     print(f"\nSummary:")
     print(f"   🟢 Benign URLs: {benign_count}")
     print(f"   🔴 Malicious URLs: {malicious_count}")
     print(f"   📋 Total Analyzed: {len(test_urls)}")
+
 
 if __name__ == "__main__":
     main()
