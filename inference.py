@@ -147,10 +147,10 @@ def main():
         "http://203.0.113.77/installer/latest_installer.zip?payload=cmd.exe",
         "https://login.example.com/?user=admin&pass=%3Cscript%3Ealert(1)%3C%2Fscript%3E",
         "https://www.bankofamerica.com/login",
-        # "http://bit.ly/2FakeLink",
+         "http://bit.ly/2FakeLink",
         # "https://www.wikipedia.org/",
         #"https://github.com/",
-        "https://malicious-phish-login.xyz/secure.php"
+        # "https://malicious-phish-login.xyz/secure.php"
     ]
 
     print("🔄 Loading model...")
