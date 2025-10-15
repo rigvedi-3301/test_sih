@@ -5,50 +5,39 @@ import json
 import os
 import numpy as np
 
-class FusionEncoder(nn.Module):
-    def __init__(self, cysec_model_name, electra_model_name):
+class CySecElectraFusion(nn.Module):
+    def __init__(self, cysec_model_name, electra_model_name, dropout_rate=0.55):
         super().__init__()
         self.cysec = AutoModel.from_pretrained(cysec_model_name)
         self.electra = AutoModel.from_pretrained(electra_model_name)
-        self.out_dim = self.cysec.config.hidden_size + self.electra.config.hidden_size
-        for param in list(self.cysec.encoder.layer[:8].parameters()):
+        hidden_size = self.cysec.config.hidden_size + self.electra.config.hidden_size
+        
+        self.classifier = nn.Sequential(
+            nn.Linear(hidden_size, 256),
+            nn.ReLU(),
+            nn.Dropout(dropout_rate),
+            nn.Linear(256, 128),
+            nn.ReLU(),
+            nn.Dropout(dropout_rate),
+            nn.Linear(128, 2)
+        )
+        
+        for param in list(self.cysec.encoder.layer[:6].parameters()):
             param.requires_grad = False
-        for param in list(self.electra.encoder.layer[:8].parameters()):
+        for param in list(self.electra.encoder.layer[:6].parameters()):
             param.requires_grad = False
 
     def forward(self, cysec_ids, cysec_mask, electra_ids, electra_mask):
-        cy_out = self.cysec(input_ids=cysec_ids, attention_mask=cysec_mask).last_hidden_state[:, 0, :]
-        el_out = self.electra(input_ids=electra_ids, attention_mask=electra_mask).last_hidden_state[:, 0, :]
-        return torch.cat((cy_out, el_out), dim=1)
-
-class AutoEncoder(nn.Module):
-    def __init__(self, input_dim, dropout_rate=0.4):
-        super().__init__()
-        self.encoder = nn.Sequential(
-            nn.Linear(input_dim, 256),
-            nn.ReLU(),
-            nn.Dropout(dropout_rate),
-            nn.Linear(256, 64),
-            nn.ReLU()
-        )
-        self.decoder = nn.Sequential(
-            nn.Linear(64, 256),
-            nn.ReLU(),
-            nn.Linear(256, input_dim),
-            nn.Tanh()
-        )
-
-    def forward(self, x):
-        z = self.encoder(x)
-        reconstructed = self.decoder(z)
-        return reconstructed, z
+        cysec_out = self.cysec(input_ids=cysec_ids, attention_mask=cysec_mask).last_hidden_state[:, 0, :]
+        electra_out = self.electra(input_ids=electra_ids, attention_mask=electra_mask).last_hidden_state[:, 0, :]
+        combined = torch.cat((cysec_out, electra_out), dim=1)
+        return self.classifier(combined)
 
 def load_model():
-    """Load the trained model and tokenizers"""
-    model_path = "cysec_electra_oneclass_model"
+    model_path = "cysec_electra_fusion_model_benign_250k"
     
     if not os.path.exists(model_path):
-        raise FileNotFoundError(f"❌ Model path not found: {model_path}")
+        raise FileNotFoundError(f"Model path not found: {model_path}")
     
     with open(f"{model_path}/training_config.json", "r") as f:
         config = json.load(f)
@@ -56,29 +45,22 @@ def load_model():
     cysec_tokenizer = AutoTokenizer.from_pretrained(f"{model_path}/cysec_tokenizer")
     electra_tokenizer = AutoTokenizer.from_pretrained(f"{model_path}/electra_tokenizer")
     
-    fusion_encoder = FusionEncoder(config["cysecbert_model"], config["electra_model"])
-    autoencoder = AutoEncoder(fusion_encoder.out_dim, dropout_rate=config["dropout_rate"])
+    model = CySecElectraFusion(config["cysecbert_model"], config["electra_model"], dropout_rate=config["dropout_rate"])
     
-    weights_path = "cysec_electra_oneclass.pth"
+    weights_path = f"{model_path}/pytorch_model.bin"
     if not os.path.exists(weights_path):
-        raise FileNotFoundError(f"❌ Model weights not found at: {weights_path}")
+        raise FileNotFoundError(f"Model weights not found at: {weights_path}")
     
     state_dict = torch.load(weights_path, map_location="cpu")
-    fusion_encoder.load_state_dict(state_dict["fusion_encoder"])
-    autoencoder.load_state_dict(state_dict["autoencoder"])
+    model.load_state_dict(state_dict)
     
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    fusion_encoder.to(device)
-    autoencoder.to(device)
-    fusion_encoder.eval()
-    autoencoder.eval()
+    model.to(device)
+    model.eval()
     
-    return fusion_encoder, autoencoder, cysec_tokenizer, electra_tokenizer, config, device
+    return model, cysec_tokenizer, electra_tokenizer, config, device
 
-def classify_urls(urls, fusion_encoder, autoencoder, cysec_tokenizer, electra_tokenizer, config, device, threshold=None):
-    """Classify URLs as malicious or benign"""
-    
-    # Tokenize URLs
+def classify_urls(urls, model, cysec_tokenizer, electra_tokenizer, config, device):
     cysec_encodings = cysec_tokenizer(
         urls,
         padding=True,
@@ -100,40 +82,30 @@ def classify_urls(urls, fusion_encoder, autoencoder, cysec_tokenizer, electra_to
     electra_mask = electra_encodings["attention_mask"].to(device)
     
     with torch.no_grad():
-        # Get embeddings (detached to match training behavior)
-        embeddings = fusion_encoder(cysec_ids, cysec_mask, electra_ids, electra_mask).detach()
-        
-        # Reconstruct using autoencoder
-        reconstructed, _ = autoencoder(embeddings)
-        
-        # Calculate reconstruction error
-        reconstruction_errors = torch.mean((embeddings - reconstructed) ** 2, dim=1).cpu().numpy()
-    
-    # Use a fixed threshold based on typical training loss
-    # Since your training loss was ~0.043 (validation), we set threshold slightly higher
-    # URLs significantly above this are anomalous (malicious)
-    if threshold is None:
-        # Conservative threshold: 3x the expected training loss
-        # This captures natural variance while flagging true outliers
-        threshold = 0.15  # Adjust this value based on your validation loss
+        logits = model(cysec_ids, cysec_mask, electra_ids, electra_mask)
+        probs = torch.softmax(logits, dim=1)
+        preds = torch.argmax(probs, dim=1)
     
     results = []
-    for url, error in zip(urls, reconstruction_errors):        
-        if error <= threshold:
+    for url, pred, prob in zip(urls, preds.cpu().numpy(), probs.cpu().numpy()):
+        if pred == 0:
             classification = "BENIGN"
+            confidence = prob[0]
         else:
             classification = "MALICIOUS"
+            confidence = prob[1]
         
         results.append({
             "url": url,
             "classification": classification,
-            "reconstruction_error": error
+            "confidence": confidence,
+            "benign_prob": prob[0],
+            "malicious_prob": prob[1]
         })
     
-    return results, threshold, reconstruction_errors
+    return results
 
 def main():
-    # Test URLs - mix of clearly benign and clearly malicious
     test_urls = [
         "https://www.example.com/",
         "https://shop.example.com/product/12345?ref=google&utm_source=email",
@@ -150,25 +122,16 @@ def main():
         "http://192.168.1.1/admin"
     ]
     
-    print("🔄 Loading model...")
-    fusion_encoder, autoencoder, cysec_tokenizer, electra_tokenizer, config, device = load_model()
-    print(f"✅ Model loaded successfully on: {device}\n")
+    print("Loading model...")
+    model, cysec_tokenizer, electra_tokenizer, config, device = load_model()
+    print(f"Model loaded successfully on: {device}\n")
     
-    print("🔍 Analyzing URLs...\n")
-    results, threshold, all_errors = classify_urls(test_urls, fusion_encoder, autoencoder, cysec_tokenizer, electra_tokenizer, config, device)
+    print("Analyzing URLs...\n")
+    results = classify_urls(test_urls, model, cysec_tokenizer, electra_tokenizer, config, device)
     
-    # Print error distribution first for debugging
-    print("📊 Reconstruction Error Distribution:")
-    print(f"   Min Error:  {np.min(all_errors):.6f}")
-    print(f"   Max Error:  {np.max(all_errors):.6f}")
-    print(f"   Mean Error: {np.mean(all_errors):.6f}")
-    print(f"   Std Error:  {np.std(all_errors):.6f}")
-    print(f"   Threshold:  {threshold:.6f}\n")
-    
-    # Display results
-    print("="*90)
-    print(f"{'URL':<65} {'CLASSIFICATION':<15} {'ERROR':<10}")
-    print("="*90)
+    print("="*100)
+    print(f"{'URL':<65} {'CLASSIFICATION':<15} {'CONFIDENCE':<10} {'BENIGN':<10} {'MALICIOUS':<10}")
+    print("="*100)
     
     benign_count = 0
     malicious_count = 0
@@ -176,7 +139,9 @@ def main():
     for result in results:
         url = result["url"][:62] + "..." if len(result["url"]) > 65 else result["url"]
         classification = result["classification"]
-        error = f"{result['reconstruction_error']:.6f}"
+        confidence = f"{result['confidence']:.4f}"
+        benign_prob = f"{result['benign_prob']:.4f}"
+        malicious_prob = f"{result['malicious_prob']:.4f}"
         
         if classification == "BENIGN":
             icon = "🟢"
@@ -185,17 +150,13 @@ def main():
             icon = "🔴"
             malicious_count += 1
         
-        print(f"{icon} {url:<63} {classification:<15} {error:<10}")
+        print(f"{icon} {url:<63} {classification:<15} {confidence:<10} {benign_prob:<10} {malicious_prob:<10}")
     
-    print("="*90)
-    print(f"\n📊 Summary:")
+    print("="*100)
+    print(f"\nSummary:")
     print(f"   🟢 Benign URLs: {benign_count}")
     print(f"   🔴 Malicious URLs: {malicious_count}")
     print(f"   📋 Total Analyzed: {len(test_urls)}")
-    print(f"\n💡 Current threshold: {threshold:.6f}")
-    print(f"   • To make MORE sensitive (catch more malicious): DECREASE threshold")
-    print(f"   • To make LESS sensitive (fewer false alarms): INCREASE threshold")
-    print(f"   • Suggested range based on your data: 0.05 to 0.30")
 
 if __name__ == "__main__":
     main()
