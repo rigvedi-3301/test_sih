@@ -126,5 +126,5 @@ def main():
         print(f"{icon} {url:<79} {r['classification']:<12} {r['reconstruction_error']:.6f}")
     print("="*110)
 
-if _name_ == "_main_":
+if __name__ == "_main_":
     main()
