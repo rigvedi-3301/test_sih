@@ -1,13 +1,10 @@
-import torch
-import os
-import json
-import numpy as np
+import torch, os, json, numpy as np
 from torch import nn
 from transformers import AutoTokenizer, AutoModel
 
-# -----------------------------
+# -------------------
 # Fusion Encoder
-# -----------------------------
+# -------------------
 class FusionEncoder(nn.Module):
     def __init__(self, cysec_model_name, electra_model_name):
         super().__init__()
@@ -15,7 +12,7 @@ class FusionEncoder(nn.Module):
         self.electra = AutoModel.from_pretrained(electra_model_name)
         self.out_dim = self.cysec.config.hidden_size + self.electra.config.hidden_size
 
-        # Freeze first 8 layers for both models
+        # freeze first 8 layers
         for param in list(self.cysec.encoder.layer[:8].parameters()):
             param.requires_grad = False
         for param in list(self.electra.encoder.layer[:8].parameters()):
@@ -26,9 +23,9 @@ class FusionEncoder(nn.Module):
         el_out = self.electra(input_ids=electra_ids, attention_mask=electra_mask).last_hidden_state[:, 0, :]
         return torch.cat((cy_out, el_out), dim=1)
 
-# -----------------------------
-# AutoEncoder (matches _v4 training)
-# -----------------------------
+# -------------------
+# AutoEncoder (matches v4 checkpoint)
+# -------------------
 class AutoEncoder(nn.Module):
     def __init__(self, input_dim, dropout_rate=0.5):
         super().__init__()
@@ -41,11 +38,11 @@ class AutoEncoder(nn.Module):
             nn.Dropout(dropout_rate),
             nn.Linear(256, 128),
             nn.ReLU(),
-            nn.Linear(128, 64),
+            nn.Linear(128, 128),
             nn.ReLU()
         )
         self.decoder = nn.Sequential(
-            nn.Linear(64, 128),
+            nn.Linear(128, 128),
             nn.ReLU(),
             nn.Linear(128, 256),
             nn.ReLU(),
@@ -60,9 +57,9 @@ class AutoEncoder(nn.Module):
         reconstructed = self.decoder(z)
         return reconstructed, z
 
-# -----------------------------
+# -------------------
 # Load Model
-# -----------------------------
+# -------------------
 def load_model():
     model_path = "cysec_electra_oneclass_model_v4"
     weights_path = "cysec_electra_oneclass_v4.pth"
@@ -72,19 +69,15 @@ def load_model():
     if not os.path.exists(weights_path):
         raise FileNotFoundError(f"❌ Weights not found: {weights_path}")
 
-    # Load config
     with open(f"{model_path}/training_config.json", "r") as f:
         config = json.load(f)
 
-    # Tokenizers
     cysec_tokenizer = AutoTokenizer.from_pretrained(f"{model_path}/cysec_tokenizer")
     electra_tokenizer = AutoTokenizer.from_pretrained(f"{model_path}/electra_tokenizer")
 
-    # Models
     fusion_encoder = FusionEncoder(config["cysecbert_model"], config["electra_model"])
     autoencoder = AutoEncoder(fusion_encoder.out_dim, dropout_rate=config.get("dropout_rate", 0.5))
 
-    # Load weights
     state_dict = torch.load(weights_path, map_location="cpu")
     fusion_encoder.load_state_dict(state_dict["fusion_encoder"])
     autoencoder.load_state_dict(state_dict["autoencoder"])
@@ -95,9 +88,9 @@ def load_model():
 
     return fusion_encoder, autoencoder, cysec_tokenizer, electra_tokenizer, config, device
 
-# -----------------------------
-# Classify URLs
-# -----------------------------
+# -------------------
+# URL Classification
+# -------------------
 def classify_urls(urls, fusion_encoder, autoencoder, cysec_tokenizer, electra_tokenizer, config, device, threshold=None):
     cysec_enc = cysec_tokenizer(urls, padding=True, truncation=True, max_length=config["max_length"], return_tensors="pt")
     electra_enc = electra_tokenizer(urls, padding=True, truncation=True, max_length=config["max_length"], return_tensors="pt")
@@ -122,9 +115,9 @@ def classify_urls(urls, fusion_encoder, autoencoder, cysec_tokenizer, electra_to
         })
     return results, threshold, errors
 
-# -----------------------------
+# -------------------
 # Main
-# -----------------------------
+# -------------------
 def main():
     test_urls = [
         "https://www.example.com/",
@@ -145,9 +138,7 @@ def main():
     print("🔄 Loading model...")
     fusion_encoder, autoencoder, cysec_tokenizer, electra_tokenizer, config, device = load_model()
 
-    results, threshold, errors = classify_urls(
-        test_urls, fusion_encoder, autoencoder, cysec_tokenizer, electra_tokenizer, config, device
-    )
+    results, threshold, errors = classify_urls(test_urls, fusion_encoder, autoencoder, cysec_tokenizer, electra_tokenizer, config, device)
 
     print("\n📊 Reconstruction Error Distribution:")
     print(f"Min: {np.min(errors):.6f}, Max: {np.max(errors):.6f}, Mean: {np.mean(errors):.6f}")
@@ -157,8 +148,8 @@ def main():
     print(f"{'URL':<80} {'CLASS':<12} {'ERROR':<10}")
     print("="*110)
     for r in results:
-        icon = "🟢" if r["classification"] == "BENIGN" else "🔴"
-        url = r["url"][:77] + "..." if len(r["url"]) > 80 else r["url"]
+        icon = "🟢" if r["classification"]=="BENIGN" else "🔴"
+        url = r["url"][:77]+"..." if len(r["url"])>80 else r["url"]
         print(f"{icon} {url:<79} {r['classification']:<12} {r['reconstruction_error']:.6f}")
     print("="*110)
 
