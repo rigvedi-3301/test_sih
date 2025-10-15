@@ -5,6 +5,8 @@ import numpy as np
 import warnings
 from torch import nn
 from transformers import AutoTokenizer, AutoModel
+from transformers.utils import logging as hf_logging
+
 
 # Suppress Hugging Face warnings
 warnings.filterwarnings("ignore", category=UserWarning)
