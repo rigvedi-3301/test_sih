@@ -22,31 +22,21 @@ class AutoEncoder(nn.Module):
     def __init__(self, input_dim, dropout_rate=0.5):
         super().__init__()
         self.encoder = nn.Sequential(
-            nn.Linear(input_dim, 512),
-            nn.ReLU(),
-            nn.Dropout(dropout_rate),
-            nn.Linear(512, 256),
-            nn.ReLU(),
-            nn.Dropout(dropout_rate),
-            nn.Linear(256, 128),
-            nn.ReLU(),
-            nn.Linear(128, 64),
-            nn.ReLU()
+            nn.Linear(input_dim, 512), nn.ReLU(), nn.Dropout(dropout_rate),
+            nn.Linear(512, 256), nn.ReLU(), nn.Dropout(dropout_rate),
+            nn.Linear(256, 128), nn.ReLU(),
+            nn.Linear(128, 64), nn.ReLU()
         )
         self.decoder = nn.Sequential(
-            nn.Linear(64, 128),
-            nn.ReLU(),
-            nn.Linear(128, 256),
-            nn.ReLU(),
-            nn.Linear(256, 512),
-            nn.ReLU(),
-            nn.Linear(512, input_dim),
-            nn.Tanh()
+            nn.Linear(64, 128), nn.ReLU(),
+            nn.Linear(128, 256), nn.ReLU(),
+            nn.Linear(256, 512), nn.ReLU(),
+            nn.Linear(512, input_dim), nn.Tanh()
         )
 
 def load_model():
-    model_path = "cysec_electra_oneclass_model_v3"
-    weights_path = "cysec_electra_oneclass_v3.pth"
+    model_path = "cysec_electra_oneclass_model_v4"
+    weights_path = "cysec_electra_oneclass_v4.pth"
     
     if not os.path.exists(model_path):
         raise FileNotFoundError(f"❌ Model path not found: {model_path}")
@@ -81,7 +71,7 @@ def classify_urls(urls, fusion_encoder, autoencoder, cysec_tokenizer, electra_to
     
     with torch.no_grad():
         embeddings = fusion_encoder(cysec_ids, cysec_mask, electra_ids, electra_mask)
-        reconstructed, _ = autoencoder(embeddings)
+        reconstructed = autoencoder.decoder(autoencoder.encoder(embeddings))  # works without forward method returning two values
         errors = torch.mean((embeddings - reconstructed) ** 2, dim=1).cpu().numpy()
     
     if threshold is None:
