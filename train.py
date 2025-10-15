@@ -31,7 +31,7 @@ config = {
 
 wandb.init(
     project="cysec_electra_oneclass",
-    name="fusion_autoencoder_benign_only_fixed",
+    name="fusion_autoencoder_benign_only_FIXED_v2",
     config=config
 )
 
@@ -156,9 +156,10 @@ for epoch in range(config["epochs"]):
         cysec_ids, cysec_mask, electra_ids, electra_mask = [b.to(device, non_blocking=False) for b in batch]
         optimizer.zero_grad(set_to_none=True)
         
+        # FIXED: Remove .detach() - let gradients flow through fusion encoder too
         fused = fusion_encoder(cysec_ids, cysec_mask, electra_ids, electra_mask)
         reconstructed, _ = autoencoder(fused)
-        loss = criterion(reconstructed, fused.detach())
+        loss = criterion(reconstructed, fused)  # ← REMOVED .detach()
         
         loss.backward()
         optimizer.step()
@@ -178,7 +179,7 @@ for epoch in range(config["epochs"]):
             cysec_ids, cysec_mask, electra_ids, electra_mask = [b.to(device, non_blocking=False) for b in batch]
             fused = fusion_encoder(cysec_ids, cysec_mask, electra_ids, electra_mask)
             reconstructed, _ = autoencoder(fused)
-            val_loss += criterion(reconstructed, fused).item()
+            val_loss += criterion(reconstructed, fused).item()  # ← Consistent now
     
     avg_train = total_loss / len(train_loader)
     avg_val = val_loss / len(val_loader)
