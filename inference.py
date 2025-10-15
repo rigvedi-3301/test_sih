@@ -34,10 +34,10 @@ class CySecElectraFusion(nn.Module):
         return self.classifier(combined)
 
 def load_model():
-    model_path = "cysec_electra_fusion_model_benign_250k"
+    model_path = "cysec_electra_oneclass_model"
     
     if not os.path.exists(model_path):
-        raise FileNotFoundError(f"Model path not found: {model_path}")
+        raise FileNotFoundError(f"❌ Model path not found: {model_path}")
     
     with open(f"{model_path}/training_config.json", "r") as f:
         config = json.load(f)
@@ -47,12 +47,17 @@ def load_model():
     
     model = CySecElectraFusion(config["cysecbert_model"], config["electra_model"], dropout_rate=config["dropout_rate"])
     
-    weights_path = f"{model_path}/pytorch_model.bin"
+    weights_path = "cysec_electra_oneclass.pth"
     if not os.path.exists(weights_path):
-        raise FileNotFoundError(f"Model weights not found at: {weights_path}")
+        raise FileNotFoundError(f"❌ Model weights not found at: {weights_path}")
     
     state_dict = torch.load(weights_path, map_location="cpu")
-    model.load_state_dict(state_dict)
+    if "fusion_encoder" in state_dict and "autoencoder" in state_dict:
+        print("⚠️ Detected autoencoder checkpoint — using fusion_encoder weights for inference.")
+        model_state = state_dict["fusion_encoder"]
+        model.load_state_dict(model_state, strict=False)
+    else:
+        model.load_state_dict(state_dict, strict=False)
     
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model.to(device)
@@ -61,25 +66,13 @@ def load_model():
     return model, cysec_tokenizer, electra_tokenizer, config, device
 
 def classify_urls(urls, model, cysec_tokenizer, electra_tokenizer, config, device):
-    cysec_encodings = cysec_tokenizer(
-        urls,
-        padding=True,
-        truncation=True,
-        max_length=config["max_length"],
-        return_tensors="pt"
-    )
-    electra_encodings = electra_tokenizer(
-        urls,
-        padding=True,
-        truncation=True,
-        max_length=config["max_length"],
-        return_tensors="pt"
-    )
+    cysec_enc = cysec_tokenizer(urls, padding=True, truncation=True, max_length=config["max_length"], return_tensors="pt")
+    electra_enc = electra_tokenizer(urls, padding=True, truncation=True, max_length=config["max_length"], return_tensors="pt")
     
-    cysec_ids = cysec_encodings["input_ids"].to(device)
-    cysec_mask = cysec_encodings["attention_mask"].to(device)
-    electra_ids = electra_encodings["input_ids"].to(device)
-    electra_mask = electra_encodings["attention_mask"].to(device)
+    cysec_ids = cysec_enc["input_ids"].to(device)
+    cysec_mask = cysec_enc["attention_mask"].to(device)
+    electra_ids = electra_enc["input_ids"].to(device)
+    electra_mask = electra_enc["attention_mask"].to(device)
     
     with torch.no_grad():
         logits = model(cysec_ids, cysec_mask, electra_ids, electra_mask)
@@ -88,21 +81,14 @@ def classify_urls(urls, model, cysec_tokenizer, electra_tokenizer, config, devic
     
     results = []
     for url, pred, prob in zip(urls, preds.cpu().numpy(), probs.cpu().numpy()):
-        if pred == 0:
-            classification = "BENIGN"
-            confidence = prob[0]
-        else:
-            classification = "MALICIOUS"
-            confidence = prob[1]
-        
+        classification = "BENIGN" if pred == 0 else "MALICIOUS"
         results.append({
             "url": url,
             "classification": classification,
-            "confidence": confidence,
-            "benign_prob": prob[0],
-            "malicious_prob": prob[1]
+            "confidence": float(prob[pred]),
+            "benign_prob": float(prob[0]),
+            "malicious_prob": float(prob[1])
         })
-    
     return results
 
 def main():
@@ -124,33 +110,22 @@ def main():
     
     print("Loading model...")
     model, cysec_tokenizer, electra_tokenizer, config, device = load_model()
-    print(f"Model loaded successfully on: {device}\n")
+    print(f"✅ Model loaded successfully on: {device}\n")
     
-    print("Analyzing URLs...\n")
+    print("🔍 Analyzing URLs...\n")
     results = classify_urls(test_urls, model, cysec_tokenizer, electra_tokenizer, config, device)
     
     print("="*100)
     print(f"{'URL':<65} {'CLASSIFICATION':<15} {'CONFIDENCE':<10} {'BENIGN':<10} {'MALICIOUS':<10}")
     print("="*100)
     
-    benign_count = 0
-    malicious_count = 0
+    benign_count = sum(r["classification"] == "BENIGN" for r in results)
+    malicious_count = len(results) - benign_count
     
-    for result in results:
-        url = result["url"][:62] + "..." if len(result["url"]) > 65 else result["url"]
-        classification = result["classification"]
-        confidence = f"{result['confidence']:.4f}"
-        benign_prob = f"{result['benign_prob']:.4f}"
-        malicious_prob = f"{result['malicious_prob']:.4f}"
-        
-        if classification == "BENIGN":
-            icon = "🟢"
-            benign_count += 1
-        else:
-            icon = "🔴"
-            malicious_count += 1
-        
-        print(f"{icon} {url:<63} {classification:<15} {confidence:<10} {benign_prob:<10} {malicious_prob:<10}")
+    for r in results:
+        url = r["url"][:62] + "..." if len(r["url"]) > 65 else r["url"]
+        icon = "🟢" if r["classification"] == "BENIGN" else "🔴"
+        print(f"{icon} {url:<63} {r['classification']:<15} {r['confidence']:.4f}   {r['benign_prob']:.4f}     {r['malicious_prob']:.4f}")
     
     print("="*100)
     print(f"\nSummary:")
