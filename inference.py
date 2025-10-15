@@ -1,14 +1,10 @@
-import os, json
-import torch
-import numpy as np
+import torch, os, json, numpy as np
 from torch import nn
 from transformers import AutoTokenizer, AutoModel
 
-NOISE_FACTOR = 0.02  # small noise to embeddings during inference
-
 class FusionEncoder(nn.Module):
-    def __init__(self, cysec_model_name, electra_model_name, freeze_layers=8):
-        super().__init__()
+    def _init_(self, cysec_model_name, electra_model_name, freeze_layers=8):
+        super()._init_()
         self.cysec = AutoModel.from_pretrained(cysec_model_name)
         self.electra = AutoModel.from_pretrained(electra_model_name)
         self.out_dim = self.cysec.config.hidden_size + self.electra.config.hidden_size
@@ -23,8 +19,8 @@ class FusionEncoder(nn.Module):
         return torch.cat((cy_out, el_out), dim=1)
 
 class AutoEncoder(nn.Module):
-    def __init__(self, input_dim, dropout_rate=0.5):
-        super().__init__()
+    def _init_(self, input_dim, dropout_rate=0.5):
+        super()._init_()
         self.encoder = nn.Sequential(
             nn.Linear(input_dim,512), nn.BatchNorm1d(512), nn.ReLU(), nn.Dropout(dropout_rate),
             nn.Linear(512,256), nn.BatchNorm1d(256), nn.ReLU(), nn.Dropout(dropout_rate),
@@ -37,7 +33,6 @@ class AutoEncoder(nn.Module):
             nn.Linear(256,512), nn.BatchNorm1d(512), nn.ReLU(), nn.Dropout(dropout_rate*0.5),
             nn.Linear(512,input_dim), nn.Tanh()
         )
-
     def forward(self, x):
         z = self.encoder(x)
         reconstructed = self.decoder(z)
@@ -52,7 +47,7 @@ def load_model():
     if not os.path.exists(weights_path):
         raise FileNotFoundError(f"❌ Weights not found: {weights_path}")
 
-    with open(f"{model_path}/training_config.json","r") as f:
+    with open(f"{model_path}/training_config.json", "r") as f:
         config = json.load(f)
 
     cysec_tokenizer = AutoTokenizer.from_pretrained(f"{model_path}/cysec_tokenizer")
@@ -71,7 +66,7 @@ def load_model():
 
     return fusion_encoder, autoencoder, cysec_tokenizer, electra_tokenizer, config, device
 
-def classify_urls(urls, fusion_encoder, autoencoder, cysec_tokenizer, electra_tokenizer, config, device):
+def classify_urls(urls, fusion_encoder, autoencoder, cysec_tokenizer, electra_tokenizer, config, device, threshold=None):
     cysec_enc = cysec_tokenizer(urls, padding=True, truncation=True, max_length=config["max_length"], return_tensors="pt")
     electra_enc = electra_tokenizer(urls, padding=True, truncation=True, max_length=config["max_length"], return_tensors="pt")
 
@@ -80,12 +75,12 @@ def classify_urls(urls, fusion_encoder, autoencoder, cysec_tokenizer, electra_to
 
     with torch.no_grad():
         embeddings = fusion_encoder(cysec_ids, cysec_mask, electra_ids, electra_mask)
-        embeddings_noisy = embeddings + torch.randn_like(embeddings)*NOISE_FACTOR
-        reconstructed, _ = autoencoder(embeddings_noisy)
-        errors = torch.mean((embeddings - reconstructed)**2, dim=1).cpu().numpy()
+        reconstructed, _ = autoencoder(embeddings)
+        errors = torch.mean((embeddings - reconstructed) ** 2, dim=1).cpu().numpy()
 
-    # adaptive threshold: 99th percentile of errors
-    threshold = np.percentile(errors, 99)
+    # Adaptive threshold using mean + small multiplier of std
+    if threshold is None:
+        threshold = np.mean(errors) + 0.1 * np.std(errors)  # more aggressive
 
     results = []
     for url, error in zip(urls, errors):
@@ -120,7 +115,7 @@ def main():
 
     print("\n📊 Reconstruction Error Distribution:")
     print(f"Min: {np.min(errors):.6f}, Max: {np.max(errors):.6f}, Mean: {np.mean(errors):.6f}")
-    print(f"Adaptive Threshold (percentile 99): {threshold:.6f}\n")
+    print(f"Adaptive Threshold: {threshold:.6f}\n")
 
     print("="*110)
     print(f"{'URL':<80} {'CLASS':<12} {'ERROR':<10}")
@@ -131,5 +126,5 @@ def main():
         print(f"{icon} {url:<79} {r['classification']:<12} {r['reconstruction_error']:.6f}")
     print("="*110)
 
-if __name__ == "__main__":
+if _name_ == "_main_":
     main()
