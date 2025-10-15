@@ -2,8 +2,13 @@ import torch
 import os
 import json
 import numpy as np
+import warnings
 from torch import nn
 from transformers import AutoTokenizer, AutoModel
+
+# Suppress Hugging Face warnings
+warnings.filterwarnings("ignore", category=UserWarning)
+os.environ["TRANSFORMERS_VERBOSITY"] = "error"
 
 # -------------------------------
 # Fusion Encoder
@@ -89,6 +94,10 @@ def load_model(model_path="cysec_electra_oneclass_model_v4", weights_path="cysec
     cysec_tokenizer = AutoTokenizer.from_pretrained(os.path.join(model_path, "cysec_tokenizer"))
     electra_tokenizer = AutoTokenizer.from_pretrained(os.path.join(model_path, "electra_tokenizer"))
 
+    # Suppress Hugging Face weight initialization messages
+    transformers_logger = __import__("transformers.utils.logging", fromlist=["logging"])
+    transformers_logger.logging.set_verbosity_error()
+
     fusion_encoder = FusionEncoder(config["cysecbert_model"], config["electra_model"], freeze_layers=config.get("freeze_layers", 8))
     autoencoder = AutoEncoder(fusion_encoder.out_dim, dropout_rate=config.get("dropout_rate", 0.5))
 
@@ -119,7 +128,6 @@ def classify_urls(urls, fusion_encoder, autoencoder, cysec_tokenizer, electra_to
         reconstructed, _ = autoencoder(embeddings)
         errors = torch.mean((embeddings - reconstructed) ** 2, dim=1).cpu().numpy()
 
-    # Adaptive threshold if none provided
     if threshold is None:
         threshold = np.mean(errors) + 0.1 * np.std(errors)
 
@@ -129,7 +137,7 @@ def classify_urls(urls, fusion_encoder, autoencoder, cysec_tokenizer, electra_to
             "url": url,
             "classification": "BENIGN" if error <= threshold else "MALICIOUS"
         })
-    return results, threshold
+    return results
 
 
 # -------------------------------
@@ -149,10 +157,9 @@ def main():
     print("🔄 Loading model...")
     fusion_encoder, autoencoder, cysec_tokenizer, electra_tokenizer, config, device = load_model()
 
-    results, threshold = classify_urls(test_urls, fusion_encoder, autoencoder, cysec_tokenizer, electra_tokenizer, config, device)
+    results = classify_urls(test_urls, fusion_encoder, autoencoder, cysec_tokenizer, electra_tokenizer, config, device)
 
-    print(f"\nAdaptive Threshold: {threshold:.6f}\n")
-    print("="*95)
+    print("\n" + "="*95)
     print(f"{'URL':<80} {'CLASS':<12}")
     print("="*95)
     for r in results:
