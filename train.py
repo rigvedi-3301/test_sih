@@ -190,14 +190,16 @@ print("💾 Saving model...")
 torch.save({
     "fusion_encoder": fusion_encoder.state_dict(),
     "autoencoder": autoencoder.state_dict()
-}, "cysec_electra_oneclass.pth")
+}, "cysec_electra_oneclass_v2.pth")
 
-os.makedirs("cysec_electra_oneclass_model", exist_ok=True)
-cysec_tokenizer.save_pretrained("cysec_electra_oneclass_model/cysec_tokenizer")
-electra_tokenizer.save_pretrained("cysec_electra_oneclass_model/electra_tokenizer")
+os.makedirs("cysec_electra_oneclass_model_v2", exist_ok=True)
+cysec_tokenizer.save_pretrained("cysec_electra_oneclass_model_v2/cysec_tokenizer")
+electra_tokenizer.save_pretrained("cysec_electra_oneclass_model_v2/electra_tokenizer")
 
-with open("cysec_electra_oneclass_model/training_config.json", "w") as f:
+with open("cysec_electra_oneclass_model_v2/training_config.json", "w") as f:
     json.dump(config, f, indent=2)
 
-wandb.save("cysec_electra_oneclass_model/*")
+wandb.save("cysec_electra_oneclass_model_v2/*")
 print("✅ One-class benign-only training complete!")
+print(f"📁 Model saved as: cysec_electra_oneclass_v2.pth")
+print(f"📁 Config saved in: cysec_electra_oneclass_model_v2/")
