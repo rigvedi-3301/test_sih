@@ -1,126 +1,251 @@
+import os, json, warnings
 import pandas as pd
 import torch
 from torch import nn
 from torch.utils.data import DataLoader, random_split, TensorDataset
-from transformers import (
-    AutoTokenizer,
-    AutoModel,
-    get_scheduler,
-    AdamW
-)
-from sklearn.metrics import accuracy_score
+from transformers import AutoTokenizer, AutoModel, get_scheduler
 import wandb
 from torch.cuda.amp import autocast, GradScaler
+
+os.environ["TOKENIZERS_PARALLELISM"] = "false"
+torch.backends.cudnn.benchmark = True
+warnings.filterwarnings("ignore")
 
 wandb.login()
 
 config = {
     "cysecbert_model": "markusbayer/CySecBERT",
     "electra_model": "google/electra-base-discriminator",
-    "max_length": 256,
+    "max_length": 128,
     "batch_size": 32,
-    "learning_rate": 1.5e-5,
-    "epochs": 3,
+    "learning_rate": 3e-7,  # Even lower
+    "epochs": 5,  # More epochs for slower learning
     "train_split": 0.9,
-    "warmup_ratio": 0.1,
+    "warmup_ratio": 0.2,  # Longer warmup - 20% of training
     "scheduler_type": "cosine",
     "optimizer": "AdamW",
-    "loss_function": "CrossEntropyLoss"
+    "weight_decay": 0.2,  # Very strong regularization
+    "dropout_rate": 0.5,
+    "max_samples": 250000,
+    "freeze_layers": 8,
+    "gradient_clip": 0.5,  # Tighter gradient clipping
+    "label_smoothing": 0.1,  # NEW: Add noise to prevent overfitting
 }
 
-wandb.init(project="cysecbert_electra_fusion", name="test_run_1", config=config)
+wandb.init(
+    project="cysec_electra_oneclass",
+    name="fusion_autoencoder_benign_only_FIXED_v2",
+    config=config
+)
 
-df = pd.read_csv("./minitrain_data/csic_cleaned.csv")
+if not torch.cuda.is_available():
+    raise RuntimeError("❌ GPU NOT FOUND! Please check CUDA.")
+device = torch.device("cuda")
+print(f"✅ GPU: {torch.cuda.get_device_name()} ({torch.cuda.get_device_properties(0).total_memory/1e9:.1f} GB)")
+torch.cuda.empty_cache()
 
-df = df.sample(frac=1, random_state=42).reset_index(drop=True)
+print("📁 Loading dataset...")
+df = pd.read_csv("dataset_1.csv")
+print(f"Loaded dataset shape: {df.shape}")
 
-texts = df["URL"] + " " + df["content"].fillna("") + " " + df["Method"].fillna("") + " " + df["User-Agent"].fillna("")
-labels = torch.tensor(df["classification"].values, dtype=torch.long)
+if "result" not in df.columns or "url" not in df.columns:
+    raise ValueError("❌ dataset_1.csv must contain columns: 'url' and 'result'")
 
+df = df[df["result"] == 0].reset_index(drop=True)
+print(f"Filtered benign samples: {len(df)}")
+
+if len(df) > config["max_samples"]:
+    df = df.sample(n=config["max_samples"], random_state=42).reset_index(drop=True)
+    print(f"Limited to {len(df)} samples")
+
+texts = df["url"].astype(str)
+
+print("🔤 Loading tokenizers...")
 cysec_tokenizer = AutoTokenizer.from_pretrained(config["cysecbert_model"])
 electra_tokenizer = AutoTokenizer.from_pretrained(config["electra_model"])
 
-cysec_enc = cysec_tokenizer(list(texts), padding=True, truncation=True, max_length=config["max_length"], return_tensors="pt")
-electra_enc = electra_tokenizer(list(texts), padding=True, truncation=True, max_length=config["max_length"], return_tensors="pt")
+def tokenize_in_chunks(tokenizer, texts, max_length, chunk_size=5000):
+    all_ids, all_masks = [], []
+    total_chunks = (len(texts) - 1) // chunk_size + 1
+    for i in range(0, len(texts), chunk_size):
+        chunk_num = i // chunk_size + 1
+        if chunk_num % 10 == 0 or chunk_num == 1 or chunk_num == total_chunks:
+            print(f"  Tokenizing chunk {chunk_num}/{total_chunks}...")
+        chunk = texts[i:i + chunk_size]
+        enc = tokenizer(list(chunk), padding=True, truncation=True, max_length=max_length, return_tensors="pt")
+        all_ids.append(enc["input_ids"])
+        all_masks.append(enc["attention_mask"])
+    print("  ✅ Tokenization complete")
+    return torch.cat(all_ids), torch.cat(all_masks)
 
-dataset = TensorDataset(
-    cysec_enc["input_ids"], cysec_enc["attention_mask"],
-    electra_enc["input_ids"], electra_enc["attention_mask"],
-    labels
-)
+print("🔄 Tokenizing with CySecBERT...")
+cysec_ids, cysec_mask = tokenize_in_chunks(cysec_tokenizer, texts, config["max_length"])
 
+print("🔄 Tokenizing with ELECTRA...")
+electra_ids, electra_mask = tokenize_in_chunks(electra_tokenizer, texts, config["max_length"])
+
+print("📊 Creating dataset...")
+dataset = TensorDataset(cysec_ids, cysec_mask, electra_ids, electra_mask)
 train_size = int(config["train_split"] * len(dataset))
 val_size = len(dataset) - train_size
-train_dataset, val_dataset = random_split(dataset, [train_size, val_size])
+train_dataset, val_dataset = random_split(dataset, [train_size, val_size], generator=torch.Generator().manual_seed(42))
 
-train_loader = DataLoader(train_dataset, batch_size=config["batch_size"], shuffle=True)
-val_loader = DataLoader(val_dataset, batch_size=config["batch_size"])
+print(f"Training samples: {len(train_dataset)}, Validation samples: {len(val_dataset)}")
 
-class CySecElectraFusion(nn.Module):
-    def __init__(self, cysec_model_name, electra_model_name):
+train_loader = DataLoader(train_dataset, batch_size=config["batch_size"], shuffle=True, num_workers=0, pin_memory=False)
+val_loader = DataLoader(val_dataset, batch_size=config["batch_size"], num_workers=0, pin_memory=False)
+
+class FusionEncoder(nn.Module):
+    def __init__(self, cysec_model_name, electra_model_name, freeze_layers=8):
         super().__init__()
+        print("🔄 Loading CySecBERT model...")
         self.cysec = AutoModel.from_pretrained(cysec_model_name)
+        print("🔄 Loading ELECTRA model...")
         self.electra = AutoModel.from_pretrained(electra_model_name)
-        hidden_size = self.cysec.config.hidden_size + self.electra.config.hidden_size
-        self.classifier = nn.Sequential(
-            nn.Linear(hidden_size, 512),
-            nn.ReLU(),
-            nn.Dropout(0.3),
-            nn.Linear(512, 2)
-        )
+        self.out_dim = self.cysec.config.hidden_size + self.electra.config.hidden_size
+        
+        # Freeze specified number of layers
+        for param in list(self.cysec.encoder.layer[:freeze_layers].parameters()):
+            param.requires_grad = False
+        for param in list(self.electra.encoder.layer[:freeze_layers].parameters()):
+            param.requires_grad = False
+        
+        print(f"✅ Fusion encoder created with output dim: {self.out_dim}")
+        print(f"🔒 Frozen first {freeze_layers} layers of both encoders")
 
     def forward(self, cysec_ids, cysec_mask, electra_ids, electra_mask):
-        cysec_out = self.cysec(input_ids=cysec_ids, attention_mask=cysec_mask).last_hidden_state[:,0,:]
-        electra_out = self.electra(input_ids=electra_ids, attention_mask=electra_mask).last_hidden_state[:,0,:]
-        combined = torch.cat((cysec_out, electra_out), dim=1)
-        return 
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-model = CySecElectraFusion(config["cysecbert_model"], config["electra_model"]).to(device)
-optimizer = AdamW(model.parameters(), lr=config["learning_rate"])
-loss_fn = nn.CrossEntropyLoss()
+        cy_out = self.cysec(input_ids=cysec_ids, attention_mask=cysec_mask).last_hidden_state[:, 0, :]
+        el_out = self.electra(input_ids=electra_ids, attention_mask=electra_mask).last_hidden_state[:, 0, :]
+        return torch.cat((cy_out, el_out), dim=1)
+
+class AutoEncoder(nn.Module):
+    def __init__(self, input_dim, dropout_rate=0.5):
+        super().__init__()
+        # More gradual compression with batch normalization
+        self.encoder = nn.Sequential(
+            nn.Linear(input_dim, 512),
+            nn.BatchNorm1d(512),
+            nn.ReLU(),
+            nn.Dropout(dropout_rate),
+            
+            nn.Linear(512, 256),
+            nn.BatchNorm1d(256),
+            nn.ReLU(),
+            nn.Dropout(dropout_rate),
+            
+            nn.Linear(256, 128),
+            nn.BatchNorm1d(128),
+            nn.ReLU(),
+            nn.Dropout(dropout_rate),
+            
+            nn.Linear(128, 64),
+            nn.ReLU()
+        )
+        self.decoder = nn.Sequential(
+            nn.Linear(64, 128),
+            nn.BatchNorm1d(128),
+            nn.ReLU(),
+            nn.Dropout(dropout_rate * 0.5),  # Less dropout in decoder
+            
+            nn.Linear(128, 256),
+            nn.BatchNorm1d(256),
+            nn.ReLU(),
+            nn.Dropout(dropout_rate * 0.5),
+            
+            nn.Linear(256, 512),
+            nn.BatchNorm1d(512),
+            nn.ReLU(),
+            nn.Dropout(dropout_rate * 0.5),
+            
+            nn.Linear(512, input_dim),
+            nn.Tanh()
+        )
+        print(f"✅ Autoencoder created with input dim: {input_dim}")
+        print(f"   Architecture: {input_dim} → 512 → 256 → 128 → 64 (bottleneck)")
+
+    def forward(self, x):
+        z = self.encoder(x)
+        reconstructed = self.decoder(z)
+        return reconstructed, z
+
+print("🧠 Initializing models...")
+fusion_encoder = FusionEncoder(config["cysecbert_model"], config["electra_model"], freeze_layers=config["freeze_layers"]).to(device)
+autoencoder = AutoEncoder(fusion_encoder.out_dim, dropout_rate=config["dropout_rate"]).to(device)
+
+params = list(fusion_encoder.parameters()) + list(autoencoder.parameters())
+optimizer = torch.optim.AdamW(params, lr=config["learning_rate"], weight_decay=config["weight_decay"])
+scheduler = get_scheduler(config["scheduler_type"], optimizer, num_warmup_steps=int(config["warmup_ratio"] * len(train_loader) * config["epochs"]), num_training_steps=len(train_loader) * config["epochs"])
+criterion = nn.MSELoss()
 scaler = GradScaler()
 
-total_steps = len(train_loader) * config["epochs"]
-warmup_steps = int(config["warmup_ratio"] * total_steps)
-scheduler = get_scheduler(
-    config["scheduler_type"], optimizer=optimizer,
-    num_warmup_steps=warmup_steps, num_training_steps=total_steps
-)
+print(f"🚀 Starting training with {len(train_loader)} batches per epoch...")
 
 for epoch in range(config["epochs"]):
-    model.train()
-    total_loss = 0
-
-    for batch in train_loader:
-        cysec_ids, cysec_mask, electra_ids, electra_mask, lbls = [b.to(device) for b in batch]
-        optimizer.zero_grad()
-
-        with autocast():
-            logits = model(cysec_ids, cysec_mask, electra_ids, electra_mask)
-            loss = loss_fn(logits, lbls)
-
-        scaler.scale(loss).backward()
-        scaler.step(optimizer)
-        scaler.update()
+    fusion_encoder.train()
+    autoencoder.train()
+    total_loss = 0.0
+    batch_count = 0
+    
+    for batch_idx, batch in enumerate(train_loader):
+        cysec_ids, cysec_mask, electra_ids, electra_mask = [b.to(device, non_blocking=False) for b in batch]
+        optimizer.zero_grad(set_to_none=True)
+        
+        # FIXED: Remove .detach() - let gradients flow through fusion encoder too
+        fused = fusion_encoder(cysec_ids, cysec_mask, electra_ids, electra_mask)
+        
+        # Add small noise to prevent overfitting (label smoothing equivalent)
+        if config.get("label_smoothing", 0) > 0:
+            noise = torch.randn_like(fused) * config["label_smoothing"] * 0.1
+            fused_noisy = fused + noise
+        else:
+            fused_noisy = fused
+            
+        reconstructed, _ = autoencoder(fused_noisy)
+        loss = criterion(reconstructed, fused)  # Compare to clean target
+        
+        loss.backward()
+        
+        # Gradient clipping to prevent exploding gradients
+        torch.nn.utils.clip_grad_norm_(params, config["gradient_clip"])
+        
+        optimizer.step()
         scheduler.step()
+        
         total_loss += loss.item()
-
-    avg_loss = total_loss / len(train_loader)
-
-    model.eval()
-    all_preds, all_lbls = [], []
+        batch_count += 1
+        
+        if (batch_idx + 1) % 100 == 0:
+            print(f"  Epoch {epoch+1}, Batch {batch_idx+1}/{len(train_loader)}, Loss: {loss.item():.6f}")
+    
+    val_loss = 0.0
+    fusion_encoder.eval()
+    autoencoder.eval()
     with torch.no_grad():
         for batch in val_loader:
-            cysec_ids, cysec_mask, electra_ids, electra_mask, lbls = [b.to(device) for b in batch]
-            logits = model(cysec_ids, cysec_mask, electra_ids, electra_mask)
-            preds = torch.argmax(logits, dim=1)
-            all_preds.extend(preds.cpu().numpy())
-            all_lbls.extend(lbls.cpu().numpy())
+            cysec_ids, cysec_mask, electra_ids, electra_mask = [b.to(device, non_blocking=False) for b in batch]
+            fused = fusion_encoder(cysec_ids, cysec_mask, electra_ids, electra_mask)
+            reconstructed, _ = autoencoder(fused)
+            val_loss += criterion(reconstructed, fused).item()  # ← Consistent now
+    
+    avg_train = total_loss / len(train_loader)
+    avg_val = val_loss / len(val_loader)
+    print(f"📊 Epoch {epoch+1}/{config['epochs']} | Train Loss: {avg_train:.6f} | Val Loss: {avg_val:.6f}")
+    wandb.log({"epoch": epoch+1, "train_loss": avg_train, "val_loss": avg_val, "lr": scheduler.get_last_lr()[0]})
 
-    acc = accuracy_score(all_lbls, all_preds)
-    print(f"Epoch {epoch+1} | Loss: {avg_loss:.4f} | Val Accuracy: {acc:.4f}")
-    wandb.log({"epoch": epoch+1, "loss": avg_loss, "val_accuracy": acc})
+print("💾 Saving model...")
+torch.save({
+    "fusion_encoder": fusion_encoder.state_dict(),
+    "autoencoder": autoencoder.state_dict()
+}, "cysec_electra_oneclass_v2.pth")
 
-model.save_pretrained("cysec_electra_fusion_model")
-wandb.save("cysec_electra_fusion_model/*")
-print("✅ Training complete! Model saved as 'cysec_electra_fusion_model'.")
+os.makedirs("cysec_electra_oneclass_model_v2", exist_ok=True)
+cysec_tokenizer.save_pretrained("cysec_electra_oneclass_model_v2/cysec_tokenizer")
+electra_tokenizer.save_pretrained("cysec_electra_oneclass_model_v2/electra_tokenizer")
+
+with open("cysec_electra_oneclass_model_v2/training_config.json", "w") as f:
+    json.dump(config, f, indent=2)
+
+wandb.save("cysec_electra_oneclass_model_v2/*")
+print("✅ One-class benign-only training complete!")
+print(f"📁 Model saved as: cysec_electra_oneclass_v2.pth")
+print(f"📁 Config saved in: cysec_electra_oneclass_model_v2/")
