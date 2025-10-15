@@ -13,28 +13,29 @@ warnings.filterwarnings("ignore")
 
 wandb.login()
 
+# ---------------- Config ----------------
 config = {
     "cysecbert_model": "markusbayer/CySecBERT",
     "electra_model": "google/electra-base-discriminator",
     "max_length": 128,
     "batch_size": 32,
-    "learning_rate": 3e-7,  # Even lower
-    "epochs": 5,  # More epochs for slower learning
+    "learning_rate": 3e-7,
+    "epochs": 5,
     "train_split": 0.9,
-    "warmup_ratio": 0.2,  # Longer warmup - 20% of training
+    "warmup_ratio": 0.2,
     "scheduler_type": "cosine",
     "optimizer": "AdamW",
-    "weight_decay": 0.2,  # Very strong regularization
+    "weight_decay": 0.2,
     "dropout_rate": 0.5,
-    "max_samples": 250000,
+    "max_samples": 300000,  # Benign samples for training
     "freeze_layers": 8,
-    "gradient_clip": 0.5,  # Tighter gradient clipping
-    "label_smoothing": 0.1,  # NEW: Add noise to prevent overfitting
+    "gradient_clip": 0.5,
+    "label_smoothing": 0.1
 }
 
 wandb.init(
     project="cysec_electra_oneclass",
-    name="fusion_autoencoder_benign_only_FIXED_v2",
+    name="fusion_autoencoder_benign_only_FIXED_v3",
     config=config
 )
 
@@ -44,22 +45,32 @@ device = torch.device("cuda")
 print(f"✅ GPU: {torch.cuda.get_device_name()} ({torch.cuda.get_device_properties(0).total_memory/1e9:.1f} GB)")
 torch.cuda.empty_cache()
 
+# ---------------- Load Dataset ----------------
 print("📁 Loading dataset...")
 df = pd.read_csv("dataset_1.csv")
-print(f"Loaded dataset shape: {df.shape}")
-
 if "result" not in df.columns or "url" not in df.columns:
     raise ValueError("❌ dataset_1.csv must contain columns: 'url' and 'result'")
 
-df = df[df["result"] == 0].reset_index(drop=True)
-print(f"Filtered benign samples: {len(df)}")
+df_benign = df[df["result"] == 0].reset_index(drop=True)
+df_malicious = df[df["result"] == 1].reset_index(drop=True)
 
-if len(df) > config["max_samples"]:
-    df = df.sample(n=config["max_samples"], random_state=42).reset_index(drop=True)
-    print(f"Limited to {len(df)} samples")
+# Limit training benign samples
+if len(df_benign) > config["max_samples"]:
+    df_benign_train = df_benign.sample(n=config["max_samples"], random_state=42).reset_index(drop=True)
+else:
+    df_benign_train = df_benign.copy()
 
-texts = df["url"].astype(str)
+# Use remaining benign + all malicious for validation
+df_benign_val = df_benign.drop(df_benign_train.index).reset_index(drop=True)
+df_val = pd.concat([df_benign_val, df_malicious]).reset_index(drop=True)
 
+train_texts = df_benign_train["url"].astype(str)
+val_texts = df_val["url"].astype(str)
+
+print(f"Training on {len(train_texts)} benign samples")
+print(f"Validation on {len(val_texts)} URLs (benign + malicious)")
+
+# ---------------- Tokenizers ----------------
 print("🔤 Loading tokenizers...")
 cysec_tokenizer = AutoTokenizer.from_pretrained(config["cysecbert_model"])
 electra_tokenizer = AutoTokenizer.from_pretrained(config["electra_model"])
@@ -75,43 +86,35 @@ def tokenize_in_chunks(tokenizer, texts, max_length, chunk_size=5000):
         enc = tokenizer(list(chunk), padding=True, truncation=True, max_length=max_length, return_tensors="pt")
         all_ids.append(enc["input_ids"])
         all_masks.append(enc["attention_mask"])
-    print("  ✅ Tokenization complete")
     return torch.cat(all_ids), torch.cat(all_masks)
 
 print("🔄 Tokenizing with CySecBERT...")
-cysec_ids, cysec_mask = tokenize_in_chunks(cysec_tokenizer, texts, config["max_length"])
+cysec_train_ids, cysec_train_mask = tokenize_in_chunks(cysec_tokenizer, train_texts, config["max_length"])
+cysec_val_ids, cysec_val_mask = tokenize_in_chunks(cysec_tokenizer, val_texts, config["max_length"])
 
 print("🔄 Tokenizing with ELECTRA...")
-electra_ids, electra_mask = tokenize_in_chunks(electra_tokenizer, texts, config["max_length"])
+electra_train_ids, electra_train_mask = tokenize_in_chunks(electra_tokenizer, train_texts, config["max_length"])
+electra_val_ids, electra_val_mask = tokenize_in_chunks(electra_tokenizer, val_texts, config["max_length"])
 
-print("📊 Creating dataset...")
-dataset = TensorDataset(cysec_ids, cysec_mask, electra_ids, electra_mask)
-train_size = int(config["train_split"] * len(dataset))
-val_size = len(dataset) - train_size
-train_dataset, val_dataset = random_split(dataset, [train_size, val_size], generator=torch.Generator().manual_seed(42))
+# ---------------- Dataset & DataLoader ----------------
+train_dataset = TensorDataset(cysec_train_ids, cysec_train_mask, electra_train_ids, electra_train_mask)
+val_dataset = TensorDataset(cysec_val_ids, cysec_val_mask, electra_val_ids, electra_val_mask)
 
-print(f"Training samples: {len(train_dataset)}, Validation samples: {len(val_dataset)}")
+train_loader = DataLoader(train_dataset, batch_size=config["batch_size"], shuffle=True, num_workers=0)
+val_loader = DataLoader(val_dataset, batch_size=config["batch_size"], shuffle=False, num_workers=0)
 
-train_loader = DataLoader(train_dataset, batch_size=config["batch_size"], shuffle=True, num_workers=0, pin_memory=False)
-val_loader = DataLoader(val_dataset, batch_size=config["batch_size"], num_workers=0, pin_memory=False)
-
+# ---------------- Model ----------------
 class FusionEncoder(nn.Module):
     def __init__(self, cysec_model_name, electra_model_name, freeze_layers=8):
         super().__init__()
-        print("🔄 Loading CySecBERT model...")
         self.cysec = AutoModel.from_pretrained(cysec_model_name)
-        print("🔄 Loading ELECTRA model...")
         self.electra = AutoModel.from_pretrained(electra_model_name)
         self.out_dim = self.cysec.config.hidden_size + self.electra.config.hidden_size
         
-        # Freeze specified number of layers
         for param in list(self.cysec.encoder.layer[:freeze_layers].parameters()):
             param.requires_grad = False
         for param in list(self.electra.encoder.layer[:freeze_layers].parameters()):
             param.requires_grad = False
-        
-        print(f"✅ Fusion encoder created with output dim: {self.out_dim}")
-        print(f"🔒 Frozen first {freeze_layers} layers of both encoders")
 
     def forward(self, cysec_ids, cysec_mask, electra_ids, electra_mask):
         cy_out = self.cysec(input_ids=cysec_ids, attention_mask=cysec_mask).last_hidden_state[:, 0, :]
@@ -121,23 +124,19 @@ class FusionEncoder(nn.Module):
 class AutoEncoder(nn.Module):
     def __init__(self, input_dim, dropout_rate=0.5):
         super().__init__()
-        # More gradual compression with batch normalization
         self.encoder = nn.Sequential(
             nn.Linear(input_dim, 512),
             nn.BatchNorm1d(512),
             nn.ReLU(),
             nn.Dropout(dropout_rate),
-            
             nn.Linear(512, 256),
             nn.BatchNorm1d(256),
             nn.ReLU(),
             nn.Dropout(dropout_rate),
-            
             nn.Linear(256, 128),
             nn.BatchNorm1d(128),
             nn.ReLU(),
             nn.Dropout(dropout_rate),
-            
             nn.Linear(128, 64),
             nn.ReLU()
         )
@@ -145,107 +144,86 @@ class AutoEncoder(nn.Module):
             nn.Linear(64, 128),
             nn.BatchNorm1d(128),
             nn.ReLU(),
-            nn.Dropout(dropout_rate * 0.5),  # Less dropout in decoder
-            
+            nn.Dropout(dropout_rate*0.5),
             nn.Linear(128, 256),
             nn.BatchNorm1d(256),
             nn.ReLU(),
-            nn.Dropout(dropout_rate * 0.5),
-            
+            nn.Dropout(dropout_rate*0.5),
             nn.Linear(256, 512),
             nn.BatchNorm1d(512),
             nn.ReLU(),
-            nn.Dropout(dropout_rate * 0.5),
-            
+            nn.Dropout(dropout_rate*0.5),
             nn.Linear(512, input_dim),
             nn.Tanh()
         )
-        print(f"✅ Autoencoder created with input dim: {input_dim}")
-        print(f"   Architecture: {input_dim} → 512 → 256 → 128 → 64 (bottleneck)")
 
-    def forward(self, x):
-        z = self.encoder(x)
-        reconstructed = self.decoder(z)
-        return reconstructed, z
-
-print("🧠 Initializing models...")
 fusion_encoder = FusionEncoder(config["cysecbert_model"], config["electra_model"], freeze_layers=config["freeze_layers"]).to(device)
 autoencoder = AutoEncoder(fusion_encoder.out_dim, dropout_rate=config["dropout_rate"]).to(device)
 
 params = list(fusion_encoder.parameters()) + list(autoencoder.parameters())
 optimizer = torch.optim.AdamW(params, lr=config["learning_rate"], weight_decay=config["weight_decay"])
-scheduler = get_scheduler(config["scheduler_type"], optimizer, num_warmup_steps=int(config["warmup_ratio"] * len(train_loader) * config["epochs"]), num_training_steps=len(train_loader) * config["epochs"])
+scheduler = get_scheduler(
+    config["scheduler_type"], optimizer,
+    num_warmup_steps=int(config["warmup_ratio"] * len(train_loader) * config["epochs"]),
+    num_training_steps=len(train_loader) * config["epochs"]
+)
 criterion = nn.MSELoss()
 scaler = GradScaler()
 
-print(f"🚀 Starting training with {len(train_loader)} batches per epoch...")
+# ---------------- Training Loop ----------------
+print(f"🚀 Starting training for {config['epochs']} epochs...")
 
 for epoch in range(config["epochs"]):
     fusion_encoder.train()
     autoencoder.train()
     total_loss = 0.0
-    batch_count = 0
-    
-    for batch_idx, batch in enumerate(train_loader):
-        cysec_ids, cysec_mask, electra_ids, electra_mask = [b.to(device, non_blocking=False) for b in batch]
+
+    for batch in train_loader:
+        cysec_ids, cysec_mask, electra_ids, electra_mask = [b.to(device) for b in batch]
         optimizer.zero_grad(set_to_none=True)
-        
-        # FIXED: Remove .detach() - let gradients flow through fusion encoder too
+
         fused = fusion_encoder(cysec_ids, cysec_mask, electra_ids, electra_mask)
-        
-        # Add small noise to prevent overfitting (label smoothing equivalent)
         if config.get("label_smoothing", 0) > 0:
             noise = torch.randn_like(fused) * config["label_smoothing"] * 0.1
             fused_noisy = fused + noise
         else:
             fused_noisy = fused
-            
+
         reconstructed, _ = autoencoder(fused_noisy)
-        loss = criterion(reconstructed, fused)  # Compare to clean target
-        
+        loss = criterion(reconstructed, fused)
         loss.backward()
-        
-        # Gradient clipping to prevent exploding gradients
         torch.nn.utils.clip_grad_norm_(params, config["gradient_clip"])
-        
         optimizer.step()
         scheduler.step()
-        
         total_loss += loss.item()
-        batch_count += 1
-        
-        if (batch_idx + 1) % 100 == 0:
-            print(f"  Epoch {epoch+1}, Batch {batch_idx+1}/{len(train_loader)}, Loss: {loss.item():.6f}")
-    
-    val_loss = 0.0
+
+    # Validation
     fusion_encoder.eval()
     autoencoder.eval()
+    val_loss = 0.0
     with torch.no_grad():
         for batch in val_loader:
-            cysec_ids, cysec_mask, electra_ids, electra_mask = [b.to(device, non_blocking=False) for b in batch]
+            cysec_ids, cysec_mask, electra_ids, electra_mask = [b.to(device) for b in batch]
             fused = fusion_encoder(cysec_ids, cysec_mask, electra_ids, electra_mask)
             reconstructed, _ = autoencoder(fused)
-            val_loss += criterion(reconstructed, fused).item()  # ← Consistent now
-    
+            val_loss += criterion(reconstructed, fused).item()
+
     avg_train = total_loss / len(train_loader)
     avg_val = val_loss / len(val_loader)
-    print(f"📊 Epoch {epoch+1}/{config['epochs']} | Train Loss: {avg_train:.6f} | Val Loss: {avg_val:.6f}")
+    print(f"Epoch {epoch+1}/{config['epochs']} | Train Loss: {avg_train:.6f} | Val Loss: {avg_val:.6f}")
     wandb.log({"epoch": epoch+1, "train_loss": avg_train, "val_loss": avg_val, "lr": scheduler.get_last_lr()[0]})
 
-print("💾 Saving model...")
+# ---------------- Save Model ----------------
 torch.save({
     "fusion_encoder": fusion_encoder.state_dict(),
     "autoencoder": autoencoder.state_dict()
-}, "cysec_electra_oneclass_v2.pth")
+}, "cysec_electra_oneclass_v3.pth")
 
-os.makedirs("cysec_electra_oneclass_model_v2", exist_ok=True)
-cysec_tokenizer.save_pretrained("cysec_electra_oneclass_model_v2/cysec_tokenizer")
-electra_tokenizer.save_pretrained("cysec_electra_oneclass_model_v2/electra_tokenizer")
-
-with open("cysec_electra_oneclass_model_v2/training_config.json", "w") as f:
+os.makedirs("cysec_electra_oneclass_model_v3", exist_ok=True)
+cysec_tokenizer.save_pretrained("cysec_electra_oneclass_model_v3/cysec_tokenizer")
+electra_tokenizer.save_pretrained("cysec_electra_oneclass_model_v3/electra_tokenizer")
+with open("cysec_electra_oneclass_model_v3/training_config.json", "w") as f:
     json.dump(config, f, indent=2)
+wandb.save("cysec_electra_oneclass_model_v3/*")
 
-wandb.save("cysec_electra_oneclass_model_v2/*")
 print("✅ One-class benign-only training complete!")
-print(f"📁 Model saved as: cysec_electra_oneclass_v2.pth")
-print(f"📁 Config saved in: cysec_electra_oneclass_model_v2/")
