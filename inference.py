@@ -138,7 +138,7 @@ def classify_urls(urls, fusion_encoder, autoencoder, cysec_tokenizer, electra_to
 # -------------------------------
 def main():
     test_urls = [
-        "https://www.wikipedia.org/",
+        # "https://www.wikipedia.org/",
         "https://shop.example.com/product/12345?ref=google&utm_source=email",
         "https://docs.example.org/user-guide/v2.1/user_guide.pdf",
         "https://www.python.org/",
