@@ -20,6 +20,7 @@ config = {
     "batch_size": 32,
     "learning_rate": 3e-7,
     "epochs": 5,
+    "train_split": 0.9,
     "warmup_ratio": 0.2,
     "scheduler_type": "cosine",
     "optimizer": "AdamW",
@@ -32,7 +33,9 @@ config = {
     "val_fraction": 0.1
 }
 
-wandb.init(project="cysec_electra_oneclass", name="fusion_autoencoder_benign_only_FIXED_v3", config=config)
+wandb.init(project="cysec_electra_oneclass",
+           name="fusion_autoencoder_benign_only_FIXED_v3",
+           config=config)
 
 if not torch.cuda.is_available():
     raise RuntimeError("GPU not found")
@@ -41,7 +44,7 @@ torch.cuda.empty_cache()
 
 df = pd.read_csv("dataset_1.csv")
 if "result" not in df.columns or "url" not in df.columns:
-    raise ValueError("dataset_1.csv must contain columns: 'url' and 'result'")
+    raise ValueError("dataset_1.csv must contain 'url' and 'result'")
 
 df_benign = df[df["result"] == 0].reset_index(drop=True)
 df_malicious = df[df["result"] == 1].reset_index(drop=True)
@@ -53,8 +56,8 @@ else:
 
 df_benign_val = df_benign.drop(df_benign_train.index).reset_index(drop=True)
 df_val_full = pd.concat([df_benign_val, df_malicious]).reset_index(drop=True)
-val_sample_size = max(1, int(len(df_val_full) * config["val_fraction"]))
-df_val = df_val_full.sample(n=val_sample_size, random_state=42).reset_index(drop=True)
+val_size = max(1, int(len(df_val_full) * config["val_fraction"]))
+df_val = df_val_full.sample(n=val_size, random_state=42).reset_index(drop=True)
 
 train_texts = df_benign_train["url"].astype(str)
 val_texts = df_val["url"].astype(str)
@@ -64,6 +67,7 @@ electra_tokenizer = AutoTokenizer.from_pretrained(config["electra_model"])
 
 def tokenize_in_chunks(tokenizer, texts, max_length, chunk_size=5000):
     all_ids, all_masks = [], []
+    total_chunks = (len(texts) - 1) // chunk_size + 1
     for i in range(0, len(texts), chunk_size):
         chunk = texts[i:i + chunk_size]
         enc = tokenizer(list(chunk), padding=True, truncation=True, max_length=max_length, return_tensors="pt")
@@ -92,6 +96,7 @@ class FusionEncoder(nn.Module):
             param.requires_grad = False
         for param in list(self.electra.encoder.layer[:freeze_layers].parameters()):
             param.requires_grad = False
+
     def forward(self, cysec_ids, cysec_mask, electra_ids, electra_mask):
         cy_out = self.cysec(input_ids=cysec_ids, attention_mask=cysec_mask).last_hidden_state[:, 0, :]
         el_out = self.electra(input_ids=electra_ids, attention_mask=electra_mask).last_hidden_state[:, 0, :]
@@ -112,6 +117,11 @@ class AutoEncoder(nn.Module):
             nn.Linear(256, 512), nn.BatchNorm1d(512), nn.ReLU(), nn.Dropout(dropout_rate*0.5),
             nn.Linear(512, input_dim), nn.Tanh()
         )
+
+    def forward(self, x):
+        z = self.encoder(x)
+        reconstructed = self.decoder(z)
+        return reconstructed, z
 
 fusion_encoder = FusionEncoder(config["cysecbert_model"], config["electra_model"], freeze_layers=config["freeze_layers"]).to(device)
 autoencoder = AutoEncoder(fusion_encoder.out_dim, dropout_rate=config["dropout_rate"]).to(device)
@@ -146,6 +156,7 @@ for epoch in range(config["epochs"]):
         optimizer.step()
         scheduler.step()
         total_loss += loss.item()
+
     fusion_encoder.eval()
     autoencoder.eval()
     val_loss = 0.0
@@ -155,6 +166,7 @@ for epoch in range(config["epochs"]):
             fused = fusion_encoder(cysec_ids, cysec_mask, electra_ids, electra_mask)
             reconstructed, _ = autoencoder(fused)
             val_loss += criterion(reconstructed, fused).item()
+
     avg_train = total_loss / len(train_loader)
     avg_val = val_loss / len(val_loader)
     print(f"Epoch {epoch+1}/{config['epochs']} | Train Loss: {avg_train:.6f} | Val Loss: {avg_val:.6f}")
@@ -171,5 +183,3 @@ electra_tokenizer.save_pretrained("cysec_electra_oneclass_model_v3/electra_token
 with open("cysec_electra_oneclass_model_v3/training_config.json", "w") as f:
     json.dump(config, f, indent=2)
 wandb.save("cysec_electra_oneclass_model_v3/*")
-
-print("One-class benign-only training complete!")
