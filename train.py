@@ -18,15 +18,16 @@ config = {
     "electra_model": "google/electra-base-discriminator",
     "max_length": 128,
     "batch_size": 16,
-    "learning_rate": 2e-6,
-    "epochs": 2,
+    "learning_rate": 1e-6,  
+    "epochs": 3,  
     "train_split": 0.9,
-    "warmup_ratio": 0.06,
+    "warmup_ratio": 0.1,  
     "scheduler_type": "cosine",
     "optimizer": "AdamW",
-    "weight_decay": 0.05,
-    "dropout_rate": 0.4,
+    "weight_decay": 0.09,  
+    "dropout_rate": 0.5,  
     "max_samples": 250000,
+    "freeze_layers": 10,  
 }
 
 wandb.init(
@@ -93,18 +94,21 @@ train_loader = DataLoader(train_dataset, batch_size=config["batch_size"], shuffl
 val_loader = DataLoader(val_dataset, batch_size=config["batch_size"], num_workers=0, pin_memory=False)
 
 class FusionEncoder(nn.Module):
-    def __init__(self, cysec_model_name, electra_model_name):
+    def __init__(self, cysec_model_name, electra_model_name, freeze_layers=10):
         super().__init__()
         print("🔄 Loading CySecBERT model...")
         self.cysec = AutoModel.from_pretrained(cysec_model_name)
         print("🔄 Loading ELECTRA model...")
         self.electra = AutoModel.from_pretrained(electra_model_name)
         self.out_dim = self.cysec.config.hidden_size + self.electra.config.hidden_size
-        for param in list(self.cysec.encoder.layer[:8].parameters()):
+        
+        for param in list(self.cysec.encoder.layer[:freeze_layers].parameters()):
             param.requires_grad = False
-        for param in list(self.electra.encoder.layer[:8].parameters()):
+        for param in list(self.electra.encoder.layer[:freeze_layers].parameters()):
             param.requires_grad = False
+        
         print(f"✅ Fusion encoder created with output dim: {self.out_dim}")
+        print(f"🔒 Frozen first {freeze_layers} layers of both encoders")
 
     def forward(self, cysec_ids, cysec_mask, electra_ids, electra_mask):
         cy_out = self.cysec(input_ids=cysec_ids, attention_mask=cysec_mask).last_hidden_state[:, 0, :]
@@ -135,7 +139,7 @@ class AutoEncoder(nn.Module):
         return reconstructed, z
 
 print("🧠 Initializing models...")
-fusion_encoder = FusionEncoder(config["cysecbert_model"], config["electra_model"]).to(device)
+fusion_encoder = FusionEncoder(config["cysecbert_model"], config["electra_model"], freeze_layers=config["freeze_layers"]).to(device)
 autoencoder = AutoEncoder(fusion_encoder.out_dim, dropout_rate=config["dropout_rate"]).to(device)
 
 params = list(fusion_encoder.parameters()) + list(autoencoder.parameters())
@@ -156,10 +160,9 @@ for epoch in range(config["epochs"]):
         cysec_ids, cysec_mask, electra_ids, electra_mask = [b.to(device, non_blocking=False) for b in batch]
         optimizer.zero_grad(set_to_none=True)
         
-        # FIXED: Remove .detach() - let gradients flow through fusion encoder too
         fused = fusion_encoder(cysec_ids, cysec_mask, electra_ids, electra_mask)
         reconstructed, _ = autoencoder(fused)
-        loss = criterion(reconstructed, fused)  # ← REMOVED .detach()
+        loss = criterion(reconstructed, fused)  
         
         loss.backward()
         optimizer.step()
@@ -179,7 +182,7 @@ for epoch in range(config["epochs"]):
             cysec_ids, cysec_mask, electra_ids, electra_mask = [b.to(device, non_blocking=False) for b in batch]
             fused = fusion_encoder(cysec_ids, cysec_mask, electra_ids, electra_mask)
             reconstructed, _ = autoencoder(fused)
-            val_loss += criterion(reconstructed, fused).item()  # ← Consistent now
+            val_loss += criterion(reconstructed, fused).item()  
     
     avg_train = total_loss / len(train_loader)
     avg_val = val_loss / len(val_loader)
