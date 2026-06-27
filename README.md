@@ -1,6 +1,6 @@
 # Test SIH Repo
 
-Test repo for a URL threat classifier built for SIH PS 25172 2025. Uses a one-class anomaly detection approach, trained only on benign URLs, so malicious ones stand out as high reconstruction error at inference.
+Test repo for a URL threat classifier securing Rank 6 in SIH PS 25172 2025. Uses a one-class anomaly detection approach, trained only on benign URLs, so malicious ones stand out as high reconstruction error at inference.
 
 ## How it works
 
